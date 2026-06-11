@@ -1,0 +1,24 @@
+# Financial data never enters git (Security Invariant 1)
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.csv
+*.ofx
+*.qfx
+.env
+
+# Test fixtures are the one sanctioned exception: fabricated data only
+!tests/fixtures/*.csv
+!tests/fixtures/*.ofx
+!tests/fixtures/*.qfx
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+dist/
+build/
