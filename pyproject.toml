@@ -1,0 +1,26 @@
+[project]
+name = "ledgerline"
+version = "0.1.0"
+description = "Local-first personal finance tracker: ingest bank exports, categorize, detect recurring, ask questions"
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.1",
+    "rich>=13.0",
+    "anthropic>=0.40",
+]
+
+[project.scripts]
+ledgerline = "ledgerline.cli:cli"
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ledgerline"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
