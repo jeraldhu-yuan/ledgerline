@@ -100,6 +100,14 @@ def test_runaway_query_is_interrupted(ro_conn):
         )
 
 
+def test_memory_hostile_queries_bounded(ro_conn):
+    # statement-size and result-size limits on the read-only connection
+    with pytest.raises(sqlite3.DataError):
+        run_sql(ro_conn, "SELECT 1 -- " + "x" * 200_000)
+    with pytest.raises(sqlite3.DataError):
+        run_sql(ro_conn, "SELECT zeroblob(100000000)")
+
+
 def test_connection_is_truly_readonly(ro_conn):
     # even if every string check failed, the mode=ro connection refuses writes
     with pytest.raises(sqlite3.OperationalError):

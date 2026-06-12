@@ -142,13 +142,15 @@ from the same institution).
   credentials, raw export files.
 - `run_sql`: read-only connection (`mode=ro` URI), single-statement
   SELECT/WITH only, keyword denylist, SQLite authorizer denying everything
-  but reads, 200-row cap and a 5-second time limit enforced server-side.
-  String literals and comments are stripped before the keyword scan, so a
-  merchant named "UPDATE" doesn't false-positive — the authorizer and
-  read-only mode remain the real guards. Tested with hostile inputs.
+  but reads, 200-row cap, a 5-second time limit, and statement/result size
+  limits enforced server-side. String literals and comments are stripped
+  before the keyword scan, so a merchant named "UPDATE" doesn't
+  false-positive — the authorizer and read-only mode remain the real
+  guards. Tested with hostile inputs.
 - SimpleFIN access URL from `SIMPLEFIN_ACCESS_URL` or a `0600` config file
-  only — never the repo, the DB, or the LLM context. `https` is required;
-  loose file permissions produce a warning.
+  only — never the repo, the DB, or the LLM context. `https` is required,
+  HTTP redirects are refused (credentials are never replayed to another
+  host), and loose file permissions produce a warning.
 - New database files are created owner-only (`0600`).
 - `ANTHROPIC_API_KEY` from env only; LLM steps fail loudly without it,
   everything else runs keyless.

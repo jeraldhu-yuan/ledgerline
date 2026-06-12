@@ -5,7 +5,8 @@ import sqlite3
 from pathlib import Path
 
 DEFAULT_DB_PATH = Path("data") / "ledgerline.db"
-MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
+# Inside the package so installed wheels carry the schema, not just repo checkouts
+MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 
 
 def db_path() -> Path:
@@ -28,10 +29,13 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
 
 
 def connect_readonly(path: Path | str | None = None) -> sqlite3.Connection:
-    """Open a read-only connection (mode=ro URI) for the LLM SQL tool."""
+    """Open a read-only connection (mode=ro URI) for the LLM SQL tool.
+    Result-size and statement-size limits bound memory even for hostile SQL."""
     path = Path(path) if path else db_path()
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
+    conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 10_000_000)
+    conn.setlimit(sqlite3.SQLITE_LIMIT_SQL_LENGTH, 100_000)
     return conn
 
 

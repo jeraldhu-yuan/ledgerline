@@ -36,6 +36,18 @@ SYNC_WINDOW_DAYS = 45
 SYNC_OVERLAP_DAYS = 7
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """SimpleFIN endpoints have no business redirecting; urllib would replay
+    the basic-auth Authorization header to the redirect target, so a redirect
+    must fail loudly instead of leaking credentials to another host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirectHandler)
+
+
 def _url_from_file(path: Path) -> str | None:
     if not path.exists():
         return None
@@ -107,7 +119,7 @@ def fetch_accounts(
         token = base64.b64encode(creds.encode()).decode()
         req.add_header("Authorization", f"Basic {token}")
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with _OPENER.open(req, timeout=60) as resp:
             return json.load(resp)
     except urllib.error.HTTPError as e:
         raise LedgerlineError(f"SimpleFIN returned HTTP {e.code}: {e.reason}") from e
