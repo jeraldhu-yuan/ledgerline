@@ -1,6 +1,6 @@
 [project]
 name = "ledgerline"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local-first personal finance pipeline: ingest bank exports, categorize, detect recurring payments, and expose read-only finance tools to AI agents over MCP"
 readme = "README.md"
 license = { file = "LICENSE" }

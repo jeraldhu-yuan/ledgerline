@@ -67,14 +67,55 @@ def access_url_from_env() -> str:
     if not url:
         url = _url_from_file(PROTECTED_ENV_FILE)
     if not url:
-        url = _url_from_file(Path(".env"))
-    if not url:
         raise LedgerlineError(
-            "SIMPLEFIN_ACCESS_URL is not set (env var, protected config, or .env). "
-            "Claim a setup token at https://bridge.simplefin.org and store the "
-            "access URL in ~/.config/ledgerline/simplefin.env with mode 0600."
+            "no SimpleFIN access URL is configured. Run `ledgerline connect` "
+            "to set up bank sync (or set SIMPLEFIN_ACCESS_URL)."
         )
     return url
+
+
+def claim_setup_token(token: str) -> str:
+    """Exchange a one-time SimpleFIN setup token for the durable access URL.
+
+    A setup token is the base64-encoded claim URL; POSTing to the claim URL
+    (no auth, empty body) returns the access URL and invalidates the token.
+    """
+    compact = "".join(token.split())  # browser copy/paste wraps long tokens
+    try:
+        claim_url = base64.b64decode(compact, validate=True).decode()
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise LedgerlineError(
+            "that does not look like a SimpleFIN setup token (expected base64)"
+        ) from exc
+    if not claim_url.startswith("https://"):
+        raise LedgerlineError("setup token must decode to an https claim URL")
+    req = urllib.request.Request(claim_url, data=b"", method="POST")
+    req.add_header("User-Agent", "Ledgerline/0.1")
+    try:
+        with _OPENER.open(req, timeout=60) as resp:
+            access_url = resp.read().decode().strip()
+    except urllib.error.HTTPError as e:
+        raise LedgerlineError(
+            f"SimpleFIN claim failed with HTTP {e.code}: {e.reason}. "
+            "Setup tokens are single-use — create a fresh one and retry."
+        ) from e
+    except urllib.error.URLError as e:
+        raise LedgerlineError(f"could not reach SimpleFIN: {e.reason}") from e
+    parts = urllib.parse.urlsplit(access_url)
+    if parts.scheme != "https" or not parts.hostname:
+        raise LedgerlineError("SimpleFIN returned an invalid access URL")
+    return access_url
+
+
+def store_access_url(access_url: str, path: Path = PROTECTED_ENV_FILE) -> Path:
+    """Write the access URL to the protected config file, owner-only."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(f"SIMPLEFIN_ACCESS_URL={access_url}\n")
+    os.chmod(path, 0o600)  # tighten pre-existing files too
+    return path
 
 
 def fetch_accounts(

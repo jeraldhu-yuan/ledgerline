@@ -99,6 +99,81 @@ def test_account_mapping_persisted(conn):
     assert calls == ["SF-ACT-1"]  # prompted once, then mapped
 
 
+class _FakeResponse:
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+class _FakeOpener:
+    def __init__(self, body: bytes):
+        self._body = body
+        self.requests = []
+
+    def open(self, req, timeout=None):
+        self.requests.append(req)
+        return _FakeResponse(self._body)
+
+
+def _token_for(claim_url: str) -> str:
+    import base64
+
+    return base64.b64encode(claim_url.encode()).decode()
+
+
+def test_claim_setup_token_posts_and_returns_access_url(monkeypatch):
+    opener = _FakeOpener(b"https://user:pass@bridge.example.com/simplefin\n")
+    monkeypatch.setattr(simplefin, "_OPENER", opener)
+
+    # whitespace-wrapped tokens (browser copy/paste) are tolerated
+    token = _token_for("https://bridge.example.com/claim/abc")
+    wrapped = token[:10] + "\n" + token[10:]
+    access_url = simplefin.claim_setup_token(wrapped)
+
+    assert access_url == "https://user:pass@bridge.example.com/simplefin"
+    assert opener.requests[0].get_method() == "POST"
+    assert opener.requests[0].full_url == "https://bridge.example.com/claim/abc"
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "not base64!!!",
+        _token_for("http://bridge.example.com/claim/abc"),  # claim URL must be https
+    ],
+)
+def test_claim_setup_token_rejects_bad_tokens(token, monkeypatch):
+    monkeypatch.setattr(simplefin, "_OPENER", _FakeOpener(b""))
+    with pytest.raises(LedgerlineError):
+        simplefin.claim_setup_token(token)
+
+
+def test_claim_setup_token_rejects_non_https_access_url(monkeypatch):
+    monkeypatch.setattr(
+        simplefin, "_OPENER", _FakeOpener(b"http://bridge.example.com/simplefin")
+    )
+    with pytest.raises(LedgerlineError, match="invalid access URL"):
+        simplefin.claim_setup_token(_token_for("https://bridge.example.com/claim/abc"))
+
+
+def test_store_access_url_is_owner_only_and_readable_back(tmp_path):
+    target = tmp_path / "config" / "simplefin.env"
+    stored = simplefin.store_access_url("https://u:p@bridge.example.com/sf", target)
+
+    assert stored == target
+    assert target.parent.stat().st_mode & 0o077 == 0
+    assert target.stat().st_mode & 0o077 == 0
+    assert simplefin._url_from_file(target) == "https://u:p@bridge.example.com/sf"
+
+
 def _sync_state(conn, key):
     row = conn.execute(
         "SELECT value FROM sync_state WHERE key = ?", (key,)

@@ -7,20 +7,44 @@ categorize transactions, detect recurring payments, and expose accurate,
 read-only finance tools to AI agents through MCP. Single user, no cloud, no
 live bank credentials — optional read-only sync via SimpleFIN Bridge.
 
-## Setup
+## Quick start
+
+[uv](https://docs.astral.sh/uv/getting-started/installation/) is the only
+prerequisite.
 
 ```sh
+git clone https://github.com/jeraldhu-yuan/ledgerline
+cd ledgerline
 uv sync
-export ANTHROPIC_API_KEY=sk-...   # optional legacy `categorize` and `ask` only
 ```
 
-The MCP server does not need an API key: Codex, Claude Code, or another MCP
-client supplies the model. Everything except the two optional legacy LLM
-features works with no API key at all. The SimpleFIN access URL is read from
-the environment first, then `~/.config/ledgerline/simplefin.env` (recommended
-mode `0600`), with a repo-local `.env` supported only for legacy setups.
+Then get transactions in. Both paths work, and they can be mixed freely —
+the importer deduplicates.
+
+**Bank sync.** Sign up at <https://bridge.simplefin.org> (SimpleFIN Bridge,
+a small paid service that turns your bank logins into read-only transaction
+feeds — Ledgerline never sees your banking credentials), link your bank(s),
+and create a new app on your account page to get a one-time setup token.
+Then:
+
+```sh
+uv run ledgerline connect    # paste the setup token when prompted
+uv run ledgerline sync       # pull your transactions
+```
+
+`connect` exchanges the token for an access URL and stores it owner-only in
+`~/.config/ledgerline/simplefin.env`. Nothing else ever reads it.
+
+**File import.** Download a CSV/OFX/QFX export from your bank's website:
+
+```sh
+uv run ledgerline ingest export.csv --account "Checking"
+```
+
 The database lives at `data/ledgerline.db` (gitignored); override with
-`--db` or `LEDGERLINE_DB`.
+`--db` or `LEDGERLINE_DB`. No API key is needed for any of this — the two
+optional embedded LLM commands (`categorize`, `ask`) read
+`ANTHROPIC_API_KEY` from the environment, and everything else runs keyless.
 
 ## AI agent access (recommended)
 
@@ -157,20 +181,17 @@ from the same institution).
 - `ANTHROPIC_API_KEY` from env only; LLM steps fail loudly without it,
   everything else runs keyless.
 
-## SimpleFIN sync (M3)
+## Bank sync notes
 
-1. **Precondition:** check your institutions are covered in the SimpleFIN/MX
-   catalog (claim a token at <https://bridge.simplefin.org> and look at the
-   institution search before relying on it). Smaller or regional institutions
-   may be missing — any account not covered stays on OFX/CSV import, and
-   mixed-mode is a supported steady state, not a fallback.
-2. Claim the setup token via the Bridge web flow, exchange it for an access
-   URL, link institutions in the Bridge UI.
-3. `export SIMPLEFIN_ACCESS_URL=https://...` (or put it in `.env`).
-4. `uv run ledgerline sync` — first sync prompts to map each SimpleFIN
-   account to a local label; partial syncs are safe to re-run. Later syncs
-   resume from local history with overlap and use provider-friendly 45-day
-   windows so stale databases can catch up without gaps.
+Check that your institutions appear in SimpleFIN's catalog before relying
+on sync — smaller or regional institutions may be missing. Any account not
+covered simply stays on OFX/CSV import; mixed-mode is a supported steady
+state, not a fallback.
+
+The first `sync` prompts to map each SimpleFIN account to a local label.
+Partial syncs are safe to re-run, and later syncs resume from local history
+with overlap, using provider-friendly 45-day windows so a stale database
+can catch up without gaps.
 
 ## Tests
 

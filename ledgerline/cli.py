@@ -280,6 +280,22 @@ def export(db_file, month, out_file):
 
 
 @cli.command()
+def connect():
+    """One-time bank-sync setup: claim a SimpleFIN setup token."""
+    from ledgerline.connectors.simplefin import claim_setup_token, store_access_url
+
+    console.print(
+        "1. Sign up at [bold]https://bridge.simplefin.org[/bold] and link your bank(s).\n"
+        "2. On your account page, create a new app to get a one-time setup token.\n"
+    )
+    token = click.prompt("Paste the setup token")
+    access_url = claim_setup_token(token)
+    stored = store_access_url(access_url)
+    console.print(f"[green]Connected.[/green] Credentials stored in {stored} (owner-only).")
+    console.print("Run [bold]ledgerline sync[/bold] to pull your transactions.")
+
+
+@cli.command()
 @click.option("--since", default=None, help="YYYY-MM-DD (default: latest local date with overlap).")
 @click.pass_obj
 def sync(db_file, since):
