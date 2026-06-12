@@ -7,10 +7,12 @@ dependencies = [
     "click>=8.1",
     "rich>=13.0",
     "anthropic>=0.40",
+    "mcp[cli]>=1.0",
 ]
 
 [project.scripts]
 ledgerline = "ledgerline.cli:cli"
+ledgerline-mcp = "ledgerline.mcp_server:main"
 
 [dependency-groups]
 dev = ["pytest>=8.0"]

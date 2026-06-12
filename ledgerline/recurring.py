@@ -25,15 +25,16 @@ def detect(conn: sqlite3.Connection) -> list[dict]:
     consistent interval. Returns the groups created or updated."""
     found = []
     merchants = conn.execute(
-        "SELECT merchant_clean, COUNT(*) AS n FROM transactions"
+        "SELECT account_id, currency, merchant_clean, COUNT(*) AS n FROM transactions"
         " WHERE merchant_clean IS NOT NULL AND amount_cents < 0"
-        " GROUP BY merchant_clean HAVING n >= 3"
+        " GROUP BY account_id, currency, merchant_clean HAVING n >= 3"
     ).fetchall()
     for row in merchants:
         txns = conn.execute(
             "SELECT id, posted_date, amount_cents FROM transactions"
-            " WHERE merchant_clean = ? AND amount_cents < 0 ORDER BY posted_date",
-            (row["merchant_clean"],),
+            " WHERE account_id = ? AND currency = ? AND merchant_clean = ?"
+            " AND amount_cents < 0 ORDER BY posted_date",
+            (row["account_id"], row["currency"], row["merchant_clean"]),
         ).fetchall()
         amounts = [t["amount_cents"] for t in txns]
         med = int(median(amounts))
@@ -47,8 +48,9 @@ def detect(conn: sqlite3.Connection) -> list[dict]:
         expected_day = mode(d.day for d in dates) if cadence == "monthly" else None
 
         existing = conn.execute(
-            "SELECT id FROM recurring_groups WHERE merchant_clean = ?",
-            (row["merchant_clean"],),
+            "SELECT id FROM recurring_groups WHERE account_id = ? AND currency = ?"
+            " AND merchant_clean = ?",
+            (row["account_id"], row["currency"], row["merchant_clean"]),
         ).fetchone()
         if existing:
             group_id = existing["id"]
@@ -60,18 +62,22 @@ def detect(conn: sqlite3.Connection) -> list[dict]:
         else:
             group_id = conn.execute(
                 "INSERT INTO recurring_groups"
-                " (label, expected_amount_cents, cadence, expected_day, merchant_clean)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (row["merchant_clean"], med, cadence, expected_day, row["merchant_clean"]),
+                " (label, expected_amount_cents, cadence, expected_day, merchant_clean,"
+                " account_id, currency) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    row["merchant_clean"], med, cadence, expected_day,
+                    row["merchant_clean"], row["account_id"], row["currency"],
+                ),
             ).lastrowid
         conn.execute(
-            "UPDATE transactions SET recurring_group_id = ? WHERE merchant_clean = ?"
-            " AND amount_cents < 0",
-            (group_id, row["merchant_clean"]),
+            "UPDATE transactions SET recurring_group_id = ? WHERE account_id = ?"
+            " AND currency = ? AND merchant_clean = ? AND amount_cents < 0",
+            (group_id, row["account_id"], row["currency"], row["merchant_clean"]),
         )
         found.append(
             {"label": row["merchant_clean"], "cadence": cadence,
-             "expected_amount_cents": med, "expected_day": expected_day}
+             "expected_amount_cents": med, "expected_day": expected_day,
+             "account_id": row["account_id"], "currency": row["currency"]}
         )
     conn.commit()
     return found
@@ -84,21 +90,45 @@ def add_manual_group(
     cadence: str,
     expected_day: int | None = None,
     merchant_clean: str | None = None,
+    account_id: int | None = None,
+    currency: str | None = None,
 ) -> int:
     """Manual group for known installments with <3 occurrences so far, so
     `upcoming` warns before the pattern is statistically detectable."""
     if cadence not in (*_CADENCE_WINDOWS, "irregular"):
         raise ValueError(f"cadence must be one of monthly/weekly/annual/irregular")
+    if merchant_clean and account_id is None:
+        matches = conn.execute(
+            "SELECT DISTINCT account_id, currency FROM transactions"
+            " WHERE merchant_clean = ?",
+            (merchant_clean,),
+        ).fetchall()
+        if len(matches) == 1:
+            account_id = matches[0]["account_id"]
+            currency = matches[0]["currency"]
+        elif len(matches) > 1:
+            raise ValueError("merchant exists in multiple accounts; specify account_id")
     group_id = conn.execute(
         "INSERT INTO recurring_groups"
-        " (label, expected_amount_cents, cadence, expected_day, merchant_clean)"
-        " VALUES (?, ?, ?, ?, ?)",
-        (label, expected_amount_cents, cadence, expected_day, merchant_clean),
+        " (label, expected_amount_cents, cadence, expected_day, merchant_clean,"
+        " account_id, currency) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            label, expected_amount_cents, cadence, expected_day, merchant_clean,
+            account_id, currency,
+        ),
     ).lastrowid
     if merchant_clean:
+        clauses = ["merchant_clean = ?"]
+        params: list[object] = [merchant_clean]
+        if account_id is not None:
+            clauses.append("account_id = ?")
+            params.append(account_id)
+        if currency is not None:
+            clauses.append("currency = ?")
+            params.append(currency)
         conn.execute(
-            "UPDATE transactions SET recurring_group_id = ? WHERE merchant_clean = ?",
-            (group_id, merchant_clean),
+            "UPDATE transactions SET recurring_group_id = ? WHERE " + " AND ".join(clauses),
+            [group_id, *params],
         )
     conn.commit()
     return group_id
@@ -123,7 +153,11 @@ def upcoming(conn: sqlite3.Connection, days: int = 30, today: date | None = None
     today = today or date.today()
     horizon = today + timedelta(days=days)
     expected = []
-    groups = conn.execute("SELECT * FROM recurring_groups WHERE active = 1").fetchall()
+    groups = conn.execute(
+        "SELECT r.*, a.name account, a.analysis_treatment, a.balance_cents"
+        " FROM recurring_groups r"
+        " LEFT JOIN accounts a ON a.id = r.account_id WHERE r.active = 1"
+    ).fetchall()
     for g in groups:
         last_row = conn.execute(
             "SELECT MAX(posted_date) AS last FROM transactions WHERE recurring_group_id = ?",
@@ -150,6 +184,10 @@ def upcoming(conn: sqlite3.Connection, days: int = 30, today: date | None = None
                     "date": nxt.isoformat(),
                     "expected_amount_cents": g["expected_amount_cents"],
                     "cadence": g["cadence"],
+                    "currency": g["currency"],
+                    "account": g["account"],
+                    "analysis_treatment": g["analysis_treatment"],
+                    "balance_cents": g["balance_cents"],
                 }
             )
     expected.sort(key=lambda e: e["date"])

@@ -52,3 +52,36 @@ def test_ask_without_key_fails_loudly(db_file, monkeypatch):
     result = runner.invoke(cli, ["--db", str(db_file), "ask", "why?"])
     assert result.exit_code == 1
     assert "ANTHROPIC_API_KEY" in result.output
+
+
+def test_accounts_set_context(db_file):
+    assert _run(db_file, "accounts", "add", "Business Card").exit_code == 0
+
+    result = _run(
+        db_file,
+        "accounts",
+        "set-context",
+        "Business Card",
+        "--purpose",
+        "business",
+        "--entity",
+        "Northwind Consulting",
+        "--context",
+        "Professional expenses",
+    )
+
+    assert result.exit_code == 0
+    assert "business" in result.output
+    from ledgerline import db
+
+    conn = db.connect(db_file)
+    row = conn.execute(
+        "SELECT purpose, entity_name, context_note FROM accounts WHERE name = ?",
+        ("Business Card",),
+    ).fetchone()
+    conn.close()
+    assert dict(row) == {
+        "purpose": "business",
+        "entity_name": "Northwind Consulting",
+        "context_note": "Professional expenses",
+    }

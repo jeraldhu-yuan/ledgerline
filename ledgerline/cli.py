@@ -175,8 +175,10 @@ def recurring_detect(db_file):
               default="monthly")
 @click.option("--day", type=int, default=None, help="Day of month (monthly cadence).")
 @click.option("--merchant", default=None, help="merchant_clean to link existing transactions.")
+@click.option("--account", default=None, help="Local account label for this recurring charge.")
+@click.option("--currency", default=None, help="Currency code, e.g. USD or CAD.")
 @click.pass_obj
-def recurring_add(db_file, label, amount, cadence, day, merchant):
+def recurring_add(db_file, label, amount, cadence, day, merchant, account, currency):
     """Manually add a known installment so `upcoming` warns before 3 charges exist."""
     from ledgerline.recurring import add_manual_group
 
@@ -184,7 +186,16 @@ def recurring_add(db_file, label, amount, cadence, day, merchant):
     if cents > 0:
         cents = -cents  # expected charges are outflows
     conn = db.connect(db_file)
-    add_manual_group(conn, label, cents, cadence, day, merchant)
+    account_id = None
+    if account:
+        row = conn.execute("SELECT id FROM accounts WHERE name = ?", (account,)).fetchone()
+        if not row:
+            raise click.ClickException(f"unknown account: {account}")
+        account_id = row["id"]
+    add_manual_group(
+        conn, label, cents, cadence, day, merchant,
+        account_id=account_id, currency=currency.upper() if currency else None,
+    )
     console.print(f"added recurring group [green]{label}[/green]")
 
 
@@ -193,10 +204,14 @@ def recurring_add(db_file, label, amount, cadence, day, merchant):
 def recurring_list(db_file):
     conn = db.connect(db_file)
     t = Table(title="Recurring groups")
-    for col in ("id", "label", "cadence", "expected", "day", "active"):
+    for col in ("id", "label", "account", "currency", "cadence", "expected", "day", "active"):
         t.add_column(col)
-    for g in conn.execute("SELECT * FROM recurring_groups"):
-        t.add_row(str(g["id"]), g["label"], g["cadence"] or "",
+    for g in conn.execute(
+        "SELECT r.*, a.name account FROM recurring_groups r"
+        " LEFT JOIN accounts a ON a.id = r.account_id"
+    ):
+        t.add_row(str(g["id"]), g["label"], g["account"] or "",
+                  g["currency"] or "", g["cadence"] or "",
                   format_cents(g["expected_amount_cents"] or 0),
                   str(g["expected_day"] or ""), str(g["active"]))
     console.print(t)
@@ -217,9 +232,13 @@ def upcoming(db_file, days):
     t = Table(title=f"Expected in the next {days} days")
     t.add_column("date")
     t.add_column("label")
+    t.add_column("currency")
     t.add_column("amount", justify="right")
     for e in expected:
-        t.add_row(e["date"], e["label"], format_cents(e["expected_amount_cents"] or 0))
+        t.add_row(
+            e["date"], e["label"], e["currency"] or "",
+            format_cents(e["expected_amount_cents"] or 0),
+        )
     console.print(t)
 
 
@@ -259,7 +278,7 @@ def export(db_file, month, out_file):
 
 
 @cli.command()
-@click.option("--since", default=None, help="YYYY-MM-DD (default: SimpleFIN's default window).")
+@click.option("--since", default=None, help="YYYY-MM-DD (default: latest local date with overlap).")
 @click.pass_obj
 def sync(db_file, since):
     """Pull transactions via SimpleFIN Bridge through the same ingest pipeline."""
@@ -274,11 +293,15 @@ def sync(db_file, since):
             default=name,
         )
 
-    results = sync_fn(conn, resolver, since=since)
+    results, provider_errors = sync_fn(conn, resolver, since=since)
     for label, r in results.items():
         console.print(
             f"{label}: [green]{r.new} new[/green] / {r.duplicates} duplicate"
         )
+    for error in provider_errors:
+        code = error.get("code", "unknown")
+        message = error.get("msg", error.get("message", "SimpleFIN reported an error"))
+        console.print(f"[yellow]SimpleFIN {code}:[/yellow] {message}")
     _, unknown = categorize_rules_only(conn)
     if unknown:
         console.print(
@@ -298,13 +321,62 @@ def accounts():
               type=click.Choice(["checking", "savings", "credit", "investment"]),
               default=None)
 @click.option("--currency", default="USD")
+@click.option("--purpose", type=click.Choice(["personal", "business", "mixed", "unknown"]),
+              default="unknown")
+@click.option("--entity", default=None, help="Owning person or legal/business entity.")
+@click.option("--business-use-percent", type=click.IntRange(0, 100), default=None)
+@click.option("--context", default=None, help="Free-form guidance for financial analysis.")
+@click.option("--analysis-treatment",
+              type=click.Choice(["include", "monitor_only", "exclude"]),
+              default="include")
 @click.pass_obj
-def accounts_add(db_file, name, institution, account_type, currency):
+def accounts_add(
+    db_file, name, institution, account_type, currency, purpose, entity,
+    business_use_percent, context, analysis_treatment,
+):
+    from ledgerline.accounts import set_context
     from ledgerline.ingest import get_or_create_account
 
     conn = db.connect(db_file)
     get_or_create_account(conn, name, institution, account_type, currency)
+    set_context(
+        conn, name, purpose=purpose, entity_name=entity,
+        business_use_percent=business_use_percent, context_note=context,
+        analysis_treatment=analysis_treatment,
+    )
     console.print(f"account [green]{name}[/green] ready")
+
+
+@accounts.command("set-context")
+@click.argument("name")
+@click.option("--purpose", type=click.Choice(["personal", "business", "mixed", "unknown"]),
+              default=None)
+@click.option("--entity", default=None, help="Owning person or legal/business entity.")
+@click.option("--business-use-percent", type=click.IntRange(0, 100), default=None)
+@click.option("--context", default=None, help="Free-form guidance for financial analysis.")
+@click.option("--analysis-treatment",
+              type=click.Choice(["include", "monitor_only", "exclude"]),
+              default=None)
+@click.pass_obj
+def accounts_set_context(
+    db_file, name, purpose, entity, business_use_percent, context, analysis_treatment,
+):
+    """Set durable personal/business context for an account."""
+    from ledgerline.accounts import set_context
+
+    conn = db.connect(db_file)
+    try:
+        account = set_context(
+            conn, name, purpose=purpose, entity_name=entity,
+            business_use_percent=business_use_percent, context_note=context,
+            analysis_treatment=analysis_treatment,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print(
+        f"updated [green]{account['name']}[/green]: {account['purpose']}"
+        + (f", entity {account['entity_name']}" if account["entity_name"] else "")
+    )
 
 
 @accounts.command("list")
@@ -312,7 +384,10 @@ def accounts_add(db_file, name, institution, account_type, currency):
 def accounts_list(db_file):
     conn = db.connect(db_file)
     t = Table(title="Accounts")
-    for col in ("id", "name", "institution", "type", "currency", "txns"):
+    for col in (
+        "id", "name", "institution", "type", "currency", "purpose", "entity",
+        "business %", "treatment", "context", "txns",
+    ):
         t.add_column(col)
     rows = conn.execute(
         "SELECT a.*, COUNT(t.id) AS n FROM accounts a"
@@ -320,7 +395,10 @@ def accounts_list(db_file):
     )
     for r in rows:
         t.add_row(str(r["id"]), r["name"], r["institution"],
-                  r["type"] or "", r["currency"], str(r["n"]))
+                  r["type"] or "", r["currency"], r["purpose"],
+                  r["entity_name"] or "",
+                  str(r["business_use_percent"] if r["business_use_percent"] is not None else ""),
+                  r["analysis_treatment"], r["context_note"] or "", str(r["n"]))
     console.print(t)
 
 

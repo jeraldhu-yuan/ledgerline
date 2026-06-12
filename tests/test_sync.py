@@ -1,5 +1,7 @@
 """M3: SimpleFIN sync through the identical ingest path, mixed-mode dedupe."""
 
+from copy import deepcopy
+
 from ledgerline.connectors.simplefin import sync_payload
 from ledgerline.ingest import ingest_file
 from tests.conftest import FIXTURES
@@ -91,3 +93,29 @@ def test_account_mapping_persisted(conn):
     sync_payload(conn, PAYLOAD, resolver)
     sync_payload(conn, PAYLOAD, resolver)
     assert calls == ["SF-ACT-1"]  # prompted once, then mapped
+
+
+def test_sync_stores_balance_institution_currency_and_type(conn):
+    payload = deepcopy(PAYLOAD)
+    payload["connections"] = [{"conn_id": "CON-1", "name": "Demo Bank"}]
+    account = payload["accounts"][0]
+    account.update({
+        "conn_id": "CON-1",
+        "balance": "1234.56",
+        "available-balance": "1200.00",
+        "balance-date": TS_FEB_02,
+        "currency": "CAD",
+    })
+
+    sync_payload(conn, payload, _resolver)
+
+    row = conn.execute(
+        "SELECT institution, currency, type, balance_cents,"
+        " available_balance_cents, balance_date FROM accounts"
+    ).fetchone()
+    assert row["institution"] == "Demo Bank"
+    assert row["currency"] == "CAD"
+    assert row["type"] == "checking"
+    assert row["balance_cents"] == 123456
+    assert row["available_balance_cents"] == 120000
+    assert row["balance_date"].startswith("2026-02-02T")

@@ -1,20 +1,50 @@
 # ledgerline
 
 Local-first personal finance pipeline: ingest bank exports into SQLite,
-categorize with LLM assistance (cached), detect recurring payments, and ask
-questions about spending in natural language. Single user, no cloud, no live
-bank credentials — optional read-only sync via SimpleFIN Bridge.
+categorize transactions, detect recurring payments, and expose accurate,
+read-only finance tools to AI agents through MCP. Single user, no cloud, no
+live bank credentials — optional read-only sync via SimpleFIN Bridge.
 
 ## Setup
 
 ```sh
 uv sync
-export ANTHROPIC_API_KEY=sk-...   # only needed for `categorize` and `ask`
+export ANTHROPIC_API_KEY=sk-...   # optional legacy `categorize` and `ask` only
 ```
 
-Everything except the two LLM features works with no API key at all.
+The MCP server does not need an API key: Codex, Claude Code, or another MCP
+client supplies the model. Everything except the two optional legacy LLM
+features works with no API key at all. The SimpleFIN access URL is read from
+the environment first, then `~/.config/ledgerline/simplefin.env` (recommended
+mode `0600`), with a repo-local `.env` supported only for legacy setups.
 The database lives at `data/ledgerline.db` (gitignored); override with
 `--db` or `LEDGERLINE_DB`.
+
+## AI agent access (recommended)
+
+Ledgerline runs as a local stdio MCP server. It exposes read-only tools for
+data freshness, transaction search, spending summaries, period comparisons,
+account balances, upcoming payments, and constrained SQL. Tools return exact
+integer-cents data, never add different currencies together, and warn agents
+when history is stale, incomplete, or uncategorized.
+
+`refresh_data` can update the local cache from SimpleFIN when current data is
+needed. SimpleFIN itself remains read-only; this tool only writes the local
+SQLite cache and rate-limits successful refreshes to once per hour by default.
+
+```sh
+# Codex (user scope)
+codex mcp add ledgerline -- /absolute/path/to/ledgerline/.venv/bin/ledgerline-mcp
+
+# Claude Code (user scope)
+claude mcp add --scope user --transport stdio ledgerline -- \
+  /absolute/path/to/ledgerline/.venv/bin/ledgerline-mcp
+```
+
+Restart the client after registration, then ask questions such as “How much
+did I spend on dining in January?” or “What recurring charges are coming up?”
+The agent should call `data_status` first and disclose whether the local data
+actually covers the requested period.
 
 ## Usage
 
@@ -38,7 +68,7 @@ uv run ledgerline recurring add --label "Course tuition installment" \
     --amount 850.00 --cadence monthly --day 21
 uv run ledgerline upcoming --days 30
 
-# Agentic Q&A over the full history (read-only SQL tool loop)
+# Optional legacy embedded Q&A (requires ANTHROPIC_API_KEY; MCP is preferred)
 uv run ledgerline ask "why was June so expensive?"
 
 # CSV dump for analysis elsewhere
@@ -46,7 +76,18 @@ uv run ledgerline export --month 2026-06 --out june.csv
 
 # SimpleFIN Bridge sync (see below)
 uv run ledgerline sync --since 2026-05-01
+
+# Durable account context for agents and reports
+uv run ledgerline accounts set-context "Business VISA" --purpose business \
+  --entity "Northwind Consulting" --context "Professional expenses and reimbursable travel"
+uv run ledgerline accounts set-context "Chequing" --purpose mixed \
+  --business-use-percent 70 --context "Practice receipts plus personal debt payments"
 ```
+
+Account context persists in SQLite and is exposed through MCP. Accounts can be
+marked `personal`, `business`, `mixed`, or `unknown`, with an optional owning
+entity, business-use percentage, and free-form note. This lets agents segment
+cash flow before judging spending or estimating business income.
 
 ## Adding a bank profile
 
@@ -101,14 +142,16 @@ from the same institution).
 
 1. **Precondition:** check your institutions are covered in the SimpleFIN/MX
    catalog (claim a token at <https://bridge.simplefin.org> and look at the
-   institution search before relying on it). Your institution may be
-   niche — if absent, that account stays on OFX/CSV import permanently, and
+   institution search before relying on it). Smaller or regional institutions
+   may be missing — any account not covered stays on OFX/CSV import, and
    mixed-mode is a supported steady state, not a fallback.
 2. Claim the setup token via the Bridge web flow, exchange it for an access
    URL, link institutions in the Bridge UI.
 3. `export SIMPLEFIN_ACCESS_URL=https://...` (or put it in `.env`).
 4. `uv run ledgerline sync` — first sync prompts to map each SimpleFIN
-   account to a local label; partial syncs are safe to re-run.
+   account to a local label; partial syncs are safe to re-run. Later syncs
+   resume from local history with overlap and use provider-friendly 45-day
+   windows so stale databases can catch up without gaps.
 
 ## Tests
 
@@ -116,7 +159,8 @@ from the same institution).
 uv run pytest
 ```
 
-76 tests cover the acceptance checklist: double-import and overlap
+Tests cover the acceptance checklist: double-import and overlap
 idempotency, mixed-mode dedupe in both orders, quarantine of malformed rows,
 integer-cents money math, keyless operation, `run_sql` hardening, recurring
-detection + manual groups, and the no-account-numbers/no-tokens invariants.
+detection + manual groups, MCP query tools, and the no-account-numbers/no-tokens
+invariants.

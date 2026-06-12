@@ -78,6 +78,24 @@ def test_detect_is_idempotent(conn):
     assert n == 1
 
 
+def test_detection_does_not_merge_accounts_or_currencies(conn):
+    _seed(conn, [
+        ("2025-11-07", -1549, "NETFLIX.COM"),
+        ("2025-12-07", -1549, "NETFLIX.COM"),
+        ("2026-01-07", -1549, "NETFLIX.COM"),
+    ], account="USD Checking")
+    account_id = get_or_create_account(conn, "CAD Checking", currency="CAD")
+    insert_transactions(conn, account_id, [
+        ParsedTxn("2025-11-07", -2000, "NETFLIX.COM"),
+        ParsedTxn("2025-12-07", -2000, "NETFLIX.COM"),
+        ParsedTxn("2026-01-07", -2000, "NETFLIX.COM"),
+    ], "seed", currency="CAD")
+
+    found = detect(conn)
+    assert len(found) == 2
+    assert {group["currency"] for group in found} == {"USD", "CAD"}
+
+
 def test_manual_group_with_one_txn_surfaces_in_upcoming(conn):
     """Acceptance: a 4-payment course tuition plan billing on the 21st warns
     BEFORE the third charge exists."""
