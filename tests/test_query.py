@@ -70,6 +70,36 @@ def test_row_cap_enforced_server_side(ro_conn):
     assert out["truncated"] is True
 
 
+def test_keywords_inside_string_literals_allowed(ro_conn):
+    out = run_sql(
+        ro_conn,
+        "SELECT COUNT(*) FROM transactions WHERE merchant_raw LIKE '%UPDATE%'",
+    )
+    assert out["rows"][0][0] == 0
+
+
+def test_semicolon_inside_literal_allowed(ro_conn):
+    out = run_sql(ro_conn, "SELECT ';' AS semi")
+    assert out["rows"] == [[";"]]
+
+
+def test_comments_do_not_block_or_hide(ro_conn):
+    out = run_sql(ro_conn, "SELECT 1 -- trailing note")
+    assert out["rows"] == [[1]]
+    with pytest.raises(ValueError):
+        run_sql(ro_conn, "SELECT 1 /* ; */ ; DROP TABLE transactions")
+
+
+def test_runaway_query_is_interrupted(ro_conn):
+    with pytest.raises(ValueError, match="time limit"):
+        run_sql(
+            ro_conn,
+            "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c)"
+            " SELECT MAX(x) FROM c",
+            time_limit=0.2,
+        )
+
+
 def test_connection_is_truly_readonly(ro_conn):
     # even if every string check failed, the mode=ro connection refuses writes
     with pytest.raises(sqlite3.OperationalError):
@@ -81,10 +111,13 @@ def test_connection_is_truly_readonly(ro_conn):
 def test_month_summary_integer_math(conn):
     ingest_file(conn, FIXTURES / "us_checking_jan.csv", "US Checking")
     s = month_summary(conn, "2026-01")
-    assert s["income_cents"] == 350000
-    assert s["outflow_cents"] == -(8245 + 450 + 450 + 1549 + 14520 + 22000 + 85000)
-    assert s["txn_count"] == 8
-    assert isinstance(s["income_cents"], int)
+    assert len(s["currencies"]) == 1
+    usd = s["currencies"][0]
+    assert usd["currency"] == "USD"
+    assert usd["income_cents"] == 350000
+    assert usd["outflow_cents"] == -(8245 + 450 + 450 + 1549 + 14520 + 22000 + 85000)
+    assert usd["txn_count"] == 8
+    assert isinstance(usd["income_cents"], int)
 
 
 def test_month_summary_deltas_vs_prior_month(conn):
@@ -100,12 +133,35 @@ def test_month_summary_deltas_vs_prior_month(conn):
     ], "seed")
     categorize_rules_only(conn)
     s = month_summary(conn, "2026-01")
-    subs = next(r for r in s["by_category"] if r["category"] == "subscriptions")
+    subs = next(
+        r for r in s["currencies"][0]["by_category"]
+        if r["category"] == "subscriptions"
+    )
     # Jan -35.49 vs Dec -15.49 -> delta -20.00
     assert subs["delta_cents"] == -2000
 
 
+def test_month_summary_never_adds_currencies(conn):
+    from ledgerline.ingest import get_or_create_account, insert_transactions
+    from ledgerline.ingest.types import ParsedTxn
+
+    usd = get_or_create_account(conn, "USD Checking", currency="USD")
+    cad = get_or_create_account(conn, "CAD Chequing", currency="CAD")
+    insert_transactions(
+        conn, usd, [ParsedTxn("2026-01-10", -10000, "USD MERCHANT")],
+        "seed", currency="USD",
+    )
+    insert_transactions(
+        conn, cad, [ParsedTxn("2026-01-10", -20000, "CAD MERCHANT")],
+        "seed", currency="CAD",
+    )
+    s = month_summary(conn, "2026-01")
+    assert {c["currency"]: c["outflow_cents"] for c in s["currencies"]} == {
+        "CAD": -20000,
+        "USD": -10000,
+    }
+
+
 def test_month_summary_empty_month(conn):
     s = month_summary(conn, "2030-01")
-    assert s["txn_count"] == 0
-    assert s["income_cents"] == 0
+    assert s["currencies"] == []

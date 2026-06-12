@@ -71,31 +71,33 @@ def summary(db_file, month):
     month = month or date.today().strftime("%Y-%m")
     conn = db.connect(db_file)
     s = month_summary(conn, month)
-    if not s["txn_count"]:
+    if not s["currencies"]:
         console.print(f"no transactions in {month}")
         return
-    console.print(
-        f"[bold]{month}[/bold]  income {format_cents(s['income_cents'])}"
-        f"  outflow {format_cents(s['outflow_cents'])}"
-        f"  net {format_cents(s['income_cents'] + s['outflow_cents'])}"
-    )
-    t = Table(title="By category")
-    t.add_column("category")
-    t.add_column("total", justify="right")
-    t.add_column("vs prior", justify="right")
-    t.add_column("txns", justify="right")
-    for r in s["by_category"]:
-        t.add_row(r["category"], format_cents(r["total_cents"]),
-                  format_cents(r["delta_cents"]), str(r["n"]))
-    console.print(t)
-    t = Table(title="Top merchants (outflow)")
-    t.add_column("merchant")
-    t.add_column("total", justify="right")
-    t.add_column("txns", justify="right")
-    for r in s["top_merchants"]:
-        t.add_row(r["merchant_clean"] or "(unknown)",
-                  format_cents(r["total_cents"]), str(r["n"]))
-    console.print(t)
+    for cur in s["currencies"]:
+        code = cur["currency"]
+        console.print(
+            f"[bold]{month} ({code})[/bold]  income {format_cents(cur['income_cents'])}"
+            f"  outflow {format_cents(cur['outflow_cents'])}"
+            f"  net {format_cents(cur['income_cents'] + cur['outflow_cents'])}"
+        )
+        t = Table(title=f"By category ({code})")
+        t.add_column("category")
+        t.add_column("total", justify="right")
+        t.add_column("vs prior", justify="right")
+        t.add_column("txns", justify="right")
+        for r in cur["by_category"]:
+            t.add_row(r["category"], format_cents(r["total_cents"]),
+                      format_cents(r["delta_cents"]), str(r["n"]))
+        console.print(t)
+        t = Table(title=f"Top merchants (outflow, {code})")
+        t.add_column("merchant")
+        t.add_column("total", justify="right")
+        t.add_column("txns", justify="right")
+        for r in cur["top_merchants"]:
+            t.add_row(r["merchant_clean"] or "(unknown)",
+                      format_cents(r["total_cents"]), str(r["n"]))
+        console.print(t)
 
 
 @cli.command()

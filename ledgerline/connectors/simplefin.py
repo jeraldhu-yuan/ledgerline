@@ -16,6 +16,7 @@ import base64
 import json
 import os
 import sqlite3
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -38,6 +39,11 @@ SYNC_OVERLAP_DAYS = 7
 def _url_from_file(path: Path) -> str | None:
     if not path.exists():
         return None
+    if path.stat().st_mode & 0o077:
+        print(
+            f"warning: {path} is readable by other users; run: chmod 600 {path}",
+            file=sys.stderr,
+        )
     for line in path.read_text().splitlines():
         if line.strip().startswith("SIMPLEFIN_ACCESS_URL="):
             return line.split("=", 1)[1].strip().strip("'\"")
@@ -67,6 +73,10 @@ def fetch_accounts(
     """GET /accounts from the SimpleFIN access URL (credentials embedded in
     the URL's userinfo, sent as HTTP basic auth)."""
     parts = urllib.parse.urlsplit(access_url)
+    if parts.scheme != "https":
+        raise LedgerlineError(
+            "SimpleFIN access URL must use https; refusing to send credentials in plaintext"
+        )
     host = parts.hostname or ""
     if parts.port:
         host += f":{parts.port}"
@@ -232,10 +242,20 @@ def sync(
             total.duplicates += result.duplicates
             total.failed += result.failed
         start = end + timedelta(days=1)
-    conn.execute(
-        "INSERT INTO sync_state (key, value) VALUES ('simplefin_last_success', ?)"
-        " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        (datetime.now(tz=timezone.utc).isoformat(),),
-    )
+    # An attempt that reached the provider is always recorded (the refresh
+    # rate limit keys off it), but "last success" stays truthful: it is only
+    # advanced when the provider reported no errors.
+    now_iso = datetime.now(tz=timezone.utc).isoformat()
+    _set_sync_state(conn, "simplefin_last_attempt", now_iso)
+    if not errors:
+        _set_sync_state(conn, "simplefin_last_success", now_iso)
     conn.commit()
     return totals, errors
+
+
+def _set_sync_state(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO sync_state (key, value) VALUES (?, ?)"
+        " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )

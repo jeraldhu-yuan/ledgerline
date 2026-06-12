@@ -13,13 +13,17 @@ def db_path() -> Path:
 
 
 def connect(path: Path | str | None = None) -> sqlite3.Connection:
-    """Open a read-write connection, creating and migrating the DB if needed."""
+    """Open a read-write connection, creating and migrating the DB if needed.
+    Fresh database files are created owner-only (0600)."""
     path = Path(path) if path else db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    fresh = not path.exists()
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     migrate(conn)
+    if fresh:
+        os.chmod(path, 0o600)
     return conn
 
 

@@ -48,6 +48,14 @@ def test_fixtures_are_fabricated_markers():
     assert "ACME" in text  # fabricated employer
 
 
+def test_new_database_is_owner_only(tmp_path):
+    from ledgerline import db
+
+    path = tmp_path / "fresh.db"
+    db.connect(path).close()
+    assert path.stat().st_mode & 0o077 == 0
+
+
 def test_simplefin_token_never_in_db(conn, monkeypatch):
     """Sync stores only SimpleFIN's opaque account id, never the access URL."""
     from ledgerline.connectors.simplefin import sync_payload

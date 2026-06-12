@@ -14,9 +14,22 @@ AMOUNT_TOLERANCE = 0.10
 
 
 def _classify_intervals(days: list[int]) -> str | None:
+    """Match intervals to a cadence, tolerating skipped occurrences: a gap of
+    ~2x the cadence (a missed month, an unpaid week) counts as that cadence
+    rather than disqualifying the whole history. At least half the intervals
+    must be single-cadence so e.g. a purely bi-weekly charge is not "weekly"."""
     for cadence, (lo, hi) in _CADENCE_WINDOWS.items():
-        if all(lo <= d <= hi for d in days):
-            return cadence
+        nominal = (lo + hi) / 2
+        single = 0
+        for d in days:
+            k = max(1, round(d / nominal))
+            if not lo * k <= d <= hi * k:
+                break
+            if k == 1:
+                single += 1
+        else:
+            if single * 2 >= len(days):
+                return cadence
     return None
 
 
@@ -177,6 +190,8 @@ def upcoming(conn: sqlite3.Connection, days: int = 30, today: date | None = None
                 nxt += timedelta(days=7)
         elif g["cadence"] == "annual" and last:
             nxt = last + timedelta(days=365)
+            while nxt < today:
+                nxt += timedelta(days=365)
         if nxt and today <= nxt <= horizon:
             expected.append(
                 {

@@ -9,6 +9,7 @@ denies everything except reads. Row cap enforced server-side.
 import json
 import re
 import sqlite3
+import time
 from datetime import date
 
 from ledgerline import LedgerlineError, db
@@ -16,11 +17,24 @@ from ledgerline.llm import MODEL, require_client
 
 ROW_CAP = 200
 MAX_TOOL_CALLS = 8
+TIME_LIMIT_SECONDS = 5.0
 
 _FORBIDDEN_RE = re.compile(
     r"\b(ATTACH|DETACH|PRAGMA|INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE"
     r"|VACUUM|REINDEX|ANALYZE|BEGIN|COMMIT|ROLLBACK|SAVEPOINT)\b",
     re.I,
+)
+
+# String literals, quoted identifiers, and comments are removed before the
+# keyword/semicolon scans so a merchant named "UPDATE" or a ';' in a literal
+# doesn't trip them. The scans run on the stripped text; the original SQL is
+# what executes — the authorizer and mode=ro connection remain the real guards.
+_SCAN_STRIP_RE = re.compile(
+    r"'(?:[^']|'')*'"
+    r'|"(?:[^"]|"")*"'
+    r"|--[^\n]*"
+    r"|/\*.*?\*/",
+    re.S,
 )
 
 _READ_ACTIONS = {
@@ -31,31 +45,47 @@ _READ_ACTIONS = {
 }
 
 
-def run_sql(conn: sqlite3.Connection, sql: str, row_cap: int = ROW_CAP) -> dict:
+def run_sql(
+    conn: sqlite3.Connection,
+    sql: str,
+    row_cap: int = ROW_CAP,
+    time_limit: float = TIME_LIMIT_SECONDS,
+) -> dict:
     """Execute one SELECT on a read-only connection. Raises ValueError on
-    anything that isn't a single plain SELECT/WITH statement."""
+    anything that isn't a single plain SELECT/WITH statement, and interrupts
+    queries that run past the time limit."""
     s = sql.strip()
     if s.endswith(";"):
         s = s[:-1].rstrip()
     if not s:
         raise ValueError("empty statement")
-    if ";" in s:
+    scan = _SCAN_STRIP_RE.sub(" ", s)
+    if ";" in scan:
         raise ValueError("multiple statements are not allowed")
-    first_word = s.split(None, 1)[0].upper()
-    if first_word not in ("SELECT", "WITH"):
+    tokens = scan.split(None, 1)
+    if not tokens or tokens[0].upper() not in ("SELECT", "WITH"):
         raise ValueError("only SELECT statements are allowed")
-    if _FORBIDDEN_RE.search(s):
+    if _FORBIDDEN_RE.search(scan):
         raise ValueError("statement contains a forbidden keyword")
 
     def _authorizer(action, *_args):
         return sqlite3.SQLITE_OK if action in _READ_ACTIONS else sqlite3.SQLITE_DENY
 
+    deadline = time.monotonic() + time_limit
     conn.set_authorizer(_authorizer)
+    conn.set_progress_handler(lambda: time.monotonic() >= deadline, 10_000)
     try:
         cur = conn.execute(s)
         columns = [c[0] for c in cur.description] if cur.description else []
         rows = cur.fetchmany(row_cap + 1)
+    except sqlite3.OperationalError as e:
+        if "interrupt" in str(e).lower():
+            raise ValueError(
+                f"query exceeded the {time_limit:g}s time limit; add filters or aggregate"
+            ) from e
+        raise
     finally:
+        conn.set_progress_handler(None, 0)
         conn.set_authorizer(None)
     truncated = len(rows) > row_cap
     return {
@@ -71,58 +101,74 @@ def _prior_month(month: str) -> str:
 
 
 def month_summary(conn: sqlite3.Connection, month: str) -> dict:
-    """Income/outflow by category, top merchants, deltas vs prior month.
-    Pure SQL + integer cents; works with no API key."""
+    """Income/outflow by category, top merchants, deltas vs prior month —
+    reported per currency, which are never combined. Pure SQL + integer cents;
+    works with no API key."""
     like = month + "-%"
     prior_like = _prior_month(month) + "-%"
 
-    totals = conn.execute(
-        "SELECT COALESCE(SUM(CASE WHEN amount_cents > 0 THEN amount_cents END), 0) AS income,"
-        " COALESCE(SUM(CASE WHEN amount_cents < 0 THEN amount_cents END), 0) AS outflow,"
-        " COUNT(*) AS n"
-        " FROM transactions WHERE posted_date LIKE ?",
-        (like,),
-    ).fetchone()
+    currencies = [
+        r[0]
+        for r in conn.execute(
+            "SELECT DISTINCT currency FROM transactions WHERE posted_date LIKE ?"
+            " ORDER BY currency",
+            (like,),
+        )
+    ]
+    out: dict = {"month": month, "currencies": []}
+    for code in currencies:
+        totals = conn.execute(
+            "SELECT COALESCE(SUM(CASE WHEN amount_cents > 0 THEN amount_cents END), 0) AS income,"
+            " COALESCE(SUM(CASE WHEN amount_cents < 0 THEN amount_cents END), 0) AS outflow,"
+            " COUNT(*) AS n"
+            " FROM transactions WHERE posted_date LIKE ? AND currency = ?",
+            (like, code),
+        ).fetchone()
 
-    by_category = conn.execute(
-        "SELECT COALESCE(category, '(uncategorized)') AS category,"
-        " SUM(amount_cents) AS total_cents, COUNT(*) AS n"
-        " FROM transactions WHERE posted_date LIKE ?"
-        " GROUP BY 1 ORDER BY total_cents",
-        (like,),
-    ).fetchall()
-
-    prior = dict(
-        conn.execute(
-            "SELECT COALESCE(category, '(uncategorized)'), SUM(amount_cents)"
-            " FROM transactions WHERE posted_date LIKE ? GROUP BY 1",
-            (prior_like,),
+        by_category = conn.execute(
+            "SELECT COALESCE(category, '(uncategorized)') AS category,"
+            " SUM(amount_cents) AS total_cents, COUNT(*) AS n"
+            " FROM transactions WHERE posted_date LIKE ? AND currency = ?"
+            " GROUP BY 1 ORDER BY total_cents",
+            (like, code),
         ).fetchall()
-    )
 
-    top_merchants = conn.execute(
-        "SELECT merchant_clean, SUM(amount_cents) AS total_cents, COUNT(*) AS n"
-        " FROM transactions WHERE posted_date LIKE ? AND amount_cents < 0"
-        " GROUP BY merchant_clean ORDER BY total_cents LIMIT 10",
-        (like,),
-    ).fetchall()
+        prior = dict(
+            conn.execute(
+                "SELECT COALESCE(category, '(uncategorized)'), SUM(amount_cents)"
+                " FROM transactions WHERE posted_date LIKE ? AND currency = ?"
+                " GROUP BY 1",
+                (prior_like, code),
+            ).fetchall()
+        )
 
-    return {
-        "month": month,
-        "income_cents": totals["income"],
-        "outflow_cents": totals["outflow"],
-        "txn_count": totals["n"],
-        "by_category": [
+        top_merchants = conn.execute(
+            "SELECT merchant_clean, SUM(amount_cents) AS total_cents, COUNT(*) AS n"
+            " FROM transactions WHERE posted_date LIKE ? AND currency = ?"
+            " AND amount_cents < 0"
+            " GROUP BY merchant_clean ORDER BY total_cents LIMIT 10",
+            (like, code),
+        ).fetchall()
+
+        out["currencies"].append(
             {
-                "category": r["category"],
-                "total_cents": r["total_cents"],
-                "n": r["n"],
-                "delta_cents": r["total_cents"] - prior.get(r["category"], 0),
+                "currency": code,
+                "income_cents": totals["income"],
+                "outflow_cents": totals["outflow"],
+                "txn_count": totals["n"],
+                "by_category": [
+                    {
+                        "category": r["category"],
+                        "total_cents": r["total_cents"],
+                        "n": r["n"],
+                        "delta_cents": r["total_cents"] - prior.get(r["category"], 0),
+                    }
+                    for r in by_category
+                ],
+                "top_merchants": [dict(r) for r in top_merchants],
             }
-            for r in by_category
-        ],
-        "top_merchants": [dict(r) for r in top_merchants],
-    }
+        )
+    return out
 
 
 def _stats_preamble(conn: sqlite3.Connection) -> str:

@@ -66,6 +66,45 @@ def test_two_occurrences_not_enough(conn):
     assert detect(conn) == []
 
 
+def test_one_skipped_month_still_detects_monthly(conn):
+    """Real exports miss a month; a single ~60-day gap must not disqualify
+    an otherwise stable monthly charge."""
+    _seed(conn, [
+        ("2025-10-07", -1549, "NETFLIX.COM"),
+        ("2025-11-07", -1549, "NETFLIX.COM"),
+        # December missing
+        ("2026-01-07", -1549, "NETFLIX.COM"),
+        ("2026-02-07", -1549, "NETFLIX.COM"),
+    ])
+    found = detect(conn)
+    assert len(found) == 1
+    assert found[0]["cadence"] == "monthly"
+
+
+def test_biweekly_is_not_classified_weekly(conn):
+    _seed(conn, [
+        ("2026-01-02", -5000, "CLEANING SERVICE"),
+        ("2026-01-16", -5000, "CLEANING SERVICE"),
+        ("2026-01-30", -5000, "CLEANING SERVICE"),
+    ])
+    assert detect(conn) == []
+
+
+def test_annual_charge_projects_past_stale_history(conn):
+    _seed(conn, [
+        ("2023-03-01", -9900, "DOMAIN RENEWAL"),
+        ("2024-03-01", -9900, "DOMAIN RENEWAL"),
+        ("2025-03-01", -9900, "DOMAIN RENEWAL"),
+    ])
+    found = detect(conn)
+    assert len(found) == 1
+    assert found[0]["cadence"] == "annual"
+    # a year of stale data later, the next occurrence still projects forward
+    expected = upcoming(conn, days=30, today=date(2026, 2, 20))
+    assert [e["label"] for e in expected] == ["Domain Renewal"]
+    assert expected[0]["date"] == "2026-03-01"
+
+
 def test_detect_is_idempotent(conn):
     _seed(conn, [
         ("2025-11-07", -1549, "NETFLIX.COM"),

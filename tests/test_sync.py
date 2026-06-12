@@ -2,6 +2,10 @@
 
 from copy import deepcopy
 
+import pytest
+
+import ledgerline.connectors.simplefin as simplefin
+from ledgerline import LedgerlineError
 from ledgerline.connectors.simplefin import sync_payload
 from ledgerline.ingest import ingest_file
 from tests.conftest import FIXTURES
@@ -93,6 +97,52 @@ def test_account_mapping_persisted(conn):
     sync_payload(conn, PAYLOAD, resolver)
     sync_payload(conn, PAYLOAD, resolver)
     assert calls == ["SF-ACT-1"]  # prompted once, then mapped
+
+
+def _sync_state(conn, key):
+    row = conn.execute(
+        "SELECT value FROM sync_state WHERE key = ?", (key,)
+    ).fetchone()
+    return row[0] if row else None
+
+
+def test_sync_requires_https(conn, monkeypatch):
+    monkeypatch.setenv(
+        "SIMPLEFIN_ACCESS_URL", "http://user:pass@bridge.example.com/simplefin"
+    )
+    with pytest.raises(LedgerlineError, match="https"):
+        simplefin.sync(conn, _resolver)
+    assert _sync_state(conn, "simplefin_last_attempt") is None
+
+
+def test_clean_sync_records_attempt_and_success(conn, monkeypatch):
+    monkeypatch.setenv(
+        "SIMPLEFIN_ACCESS_URL", "https://user:pass@bridge.example.com/simplefin"
+    )
+    monkeypatch.setattr(
+        simplefin, "fetch_accounts",
+        lambda url, since=None, until=None: deepcopy(PAYLOAD),
+    )
+    _, errors = simplefin.sync(conn, _resolver)
+    assert errors == []
+    assert _sync_state(conn, "simplefin_last_attempt") is not None
+    assert _sync_state(conn, "simplefin_last_success") is not None
+
+
+def test_partially_failed_sync_does_not_claim_success(conn, monkeypatch):
+    payload = deepcopy(PAYLOAD)
+    payload["errors"] = ["Connection to Demo Bank may need attention"]
+    monkeypatch.setenv(
+        "SIMPLEFIN_ACCESS_URL", "https://user:pass@bridge.example.com/simplefin"
+    )
+    monkeypatch.setattr(
+        simplefin, "fetch_accounts",
+        lambda url, since=None, until=None: deepcopy(payload),
+    )
+    _, errors = simplefin.sync(conn, _resolver)
+    assert errors and errors[0]["msg"]
+    assert _sync_state(conn, "simplefin_last_attempt") is not None
+    assert _sync_state(conn, "simplefin_last_success") is None
 
 
 def test_sync_stores_balance_institution_currency_and_type(conn):
