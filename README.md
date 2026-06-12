@@ -32,8 +32,12 @@ uv run ledgerline connect    # paste the setup token when prompted
 uv run ledgerline sync       # pull your transactions
 ```
 
-`connect` exchanges the token for an access URL and stores it owner-only in
-`~/.config/ledgerline/simplefin.env`. Nothing else ever reads it.
+`connect` stores the resulting access URL owner-only in
+`~/.config/ledgerline/simplefin.env`. The first `sync` prompts to map each
+bank account to a local label; re-running is always safe, and a stale
+database catches up in provider-friendly 45-day windows. If an institution
+is missing from SimpleFIN's catalog, that account just stays on file
+import — mixing both paths is a supported steady state.
 
 **File import.** Download a CSV/OFX/QFX export from your bank's website:
 
@@ -48,24 +52,18 @@ optional embedded LLM commands (`categorize`, `ask`) read
 
 ## AI agent access (recommended)
 
-Ledgerline runs as a local stdio MCP server. It exposes read-only tools for
-data freshness, transaction search, spending summaries, period comparisons,
-account balances, upcoming payments, and constrained SQL. Tools return exact
-integer-cents data, never add different currencies together, and warn agents
-when history is stale, incomplete, or uncategorized.
+Ledgerline runs as a local stdio MCP server exposing read-only tools: data
+freshness, transaction search, spending summaries, period comparisons,
+account balances, upcoming payments, and constrained SQL. The contract is
+deliberately small and uniform — exact integer cents, totals always per
+currency and never combined, and limitations (staleness, uncategorized
+spend, unknown account purpose) reported as data rather than prescriptive
+workflow text. The reasoning is the client model's job; the server's job is
+exact, truthful primitives.
 
-`refresh_data` can update the local cache from SimpleFIN when current data is
-needed. SimpleFIN itself remains read-only; this tool only writes the local
-SQLite cache and rate-limits refresh attempts to once per hour by default. A
-refresh that completes with provider errors is recorded as an attempt but not
-a success, and `data_status` discloses the difference.
-
-The tool contract is deliberately small and uniform: every money figure is an
-exact integer-cent value scoped to one currency (plus a formatted string),
-totals are always lists keyed by currency, and limitations (staleness,
-uncategorized spend, unknown account purpose) are reported as data rather
-than baked into prescriptive workflow text. The reasoning is the client
-model's job; the server's job is exact, truthful primitives.
+The one cache-writing tool, `refresh_data`, pulls from SimpleFIN at most
+once an hour. A refresh that hits provider errors is recorded as an attempt
+but not a success, and `data_status` discloses the difference.
 
 ```sh
 # Codex (user scope)
@@ -76,18 +74,12 @@ claude mcp add --scope user --transport stdio ledgerline -- \
   /absolute/path/to/ledgerline/.venv/bin/ledgerline-mcp
 ```
 
-Restart the client after registration, then ask questions such as “How much
-did I spend on dining in January?” or “What recurring charges are coming up?”
-The agent should call `data_status` first and disclose whether the local data
-actually covers the requested period.
+Restart the client, then ask things like “How much did I spend on dining in
+January?” or “What recurring charges are coming up?”
 
 ## Usage
 
 ```sh
-# Import a bank export (CSV profile auto-detected, OFX/QFX sniffed)
-uv run ledgerline ingest data/raw/export.csv --account "US Checking"
-# -> 8 new / 0 duplicate / 0 failed rows
-
 # Monthly summary: income/outflow by category, top merchants, deltas
 uv run ledgerline summary --month 2026-06
 
@@ -103,32 +95,25 @@ uv run ledgerline recurring add --label "Course tuition installment" \
     --amount 850.00 --cadence monthly --day 21
 uv run ledgerline upcoming --days 30
 
-# Optional legacy embedded Q&A (requires ANTHROPIC_API_KEY; MCP is preferred)
+# Embedded Q&A for use without an MCP client (needs ANTHROPIC_API_KEY)
 uv run ledgerline ask "why was June so expensive?"
 
 # CSV dump for analysis elsewhere
 uv run ledgerline export --month 2026-06 --out june.csv
 
-# SimpleFIN Bridge sync (see below)
-uv run ledgerline sync --since 2026-05-01
-
 # Durable account context for agents and reports
-uv run ledgerline accounts set-context "Business VISA" --purpose business \
-  --entity "Northwind Consulting" --context "Professional expenses and reimbursable travel"
 uv run ledgerline accounts set-context "Chequing" --purpose mixed \
-  --business-use-percent 70 --context "Practice receipts plus personal debt payments"
+  --entity "Northwind Consulting" --business-use-percent 70 \
+  --context "Business income plus personal spending"
 ```
 
-Account context persists in SQLite and is exposed through MCP. Accounts can be
-marked `personal`, `business`, `mixed`, or `unknown`, with an optional owning
-entity, business-use percentage, and free-form note. This lets agents segment
-cash flow before judging spending or estimating business income.
+Account context (`personal`/`business`/`mixed`/`unknown`, owning entity,
+business-use percentage, free-form note) persists in SQLite and rides along
+on every MCP result, so agents segment cash flow before judging it.
 
-## Adding a bank profile
-
-A profile is a small dict in `ledgerline/ingest/profiles.py`: column names for
-date/amount/description, the date format, the sign convention (some banks
-export debits as positive), and rows to skip. Two examples ship configured.
+**Bank profiles.** A CSV profile is a small dict in
+`ledgerline/ingest/profiles.py`: column names, date format, sign convention,
+rows to skip. Two examples ship configured; OFX/QFX needs no profile.
 
 ## Idempotency
 
@@ -168,11 +153,10 @@ from the same institution).
   credentials, raw export files.
 - `run_sql`: read-only connection (`mode=ro` URI), single-statement
   SELECT/WITH only, keyword denylist, SQLite authorizer denying everything
-  but reads, 200-row cap, a 5-second time limit, and statement/result size
-  limits enforced server-side. String literals and comments are stripped
-  before the keyword scan, so a merchant named "UPDATE" doesn't
-  false-positive — the authorizer and read-only mode remain the real
-  guards. Tested with hostile inputs.
+  but reads, 200-row cap, 5-second time limit, statement/result size limits.
+  Literals and comments are stripped before the keyword scan (a merchant
+  named "UPDATE" is not a false positive); the authorizer and read-only mode
+  are the real guards. Tested with hostile inputs.
 - SimpleFIN access URL from `SIMPLEFIN_ACCESS_URL` or a `0600` config file
   only — never the repo, the DB, or the LLM context. `https` is required,
   HTTP redirects are refused (credentials are never replayed to another
@@ -181,31 +165,16 @@ from the same institution).
 - `ANTHROPIC_API_KEY` from env only; LLM steps fail loudly without it,
   everything else runs keyless.
 
-## Bank sync notes
-
-Check that your institutions appear in SimpleFIN's catalog before relying
-on sync — smaller or regional institutions may be missing. Any account not
-covered simply stays on OFX/CSV import; mixed-mode is a supported steady
-state, not a fallback.
-
-The first `sync` prompts to map each SimpleFIN account to a local label.
-Partial syncs are safe to re-run, and later syncs resume from local history
-with overlap, using provider-friendly 45-day windows so a stale database
-can catch up without gaps.
-
 ## Tests
 
 ```sh
 uv run pytest
 ```
 
-Tests cover the acceptance checklist: double-import and overlap
-idempotency, mixed-mode dedupe in both orders, quarantine of malformed rows,
-integer-cents money math, per-currency summaries, keyless operation,
-`run_sql` hardening (hostile inputs, literals, time limit), recurring
-detection with gap tolerance, manual groups, MCP query tools, sync
-attempt-vs-success bookkeeping, and the no-account-numbers/no-tokens/0600
-invariants.
+The suite covers the acceptance checklist: mixed-mode dedupe in both
+orders, quarantine of malformed rows, integer-cents math, per-currency
+reporting, `run_sql` hardening against hostile inputs, recurring detection
+with gap tolerance, the MCP tools, and the security invariants above.
 
 ## License
 
