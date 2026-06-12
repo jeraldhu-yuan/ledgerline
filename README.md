@@ -2,10 +2,11 @@
 
 [![CI](https://github.com/jeraldhu-yuan/ledgerline/actions/workflows/ci.yml/badge.svg)](https://github.com/jeraldhu-yuan/ledgerline/actions/workflows/ci.yml)
 
-Local-first personal finance pipeline: ingest bank exports into SQLite,
-categorize transactions, detect recurring payments, and expose accurate,
-read-only finance tools to AI agents through MCP. Single user, no cloud, no
-live bank credentials — optional read-only sync via SimpleFIN Bridge.
+Local-first personal finance pipeline: sync transactions read-only via
+SimpleFIN Bridge (or import bank exports by hand), categorize them, detect
+recurring payments, and expose exact, truthful finance tools to AI agents
+over MCP. Single user, one SQLite file, no cloud — your banking credentials
+never touch this tool.
 
 ## Quick start
 
