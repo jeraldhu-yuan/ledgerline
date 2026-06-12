@@ -47,27 +47,17 @@ LOCAL_METADATA = ToolAnnotations(
 mcp = FastMCP(
     "ledgerline",
     instructions=(
-        "Ledgerline provides read-only access to the user's local personal-finance "
-        "database. Call data_status before answering a finance question so you know "
-        "the available date range and whether the data is stale. Call refresh_data "
-        "when current data is needed and the cache is stale. Prefer "
-        "account_overview, spending_summary, compare_periods, search_transactions, "
-        "and upcoming_payments over raw_sql. Amounts are exact integer cents; negative "
-        "transaction amounts are outflows. Never add different currencies together. "
-        "Use account purpose, entity_name, business_use_percent, analysis_treatment, and "
-        "context_note before classifying activity. Exclude monitor_only accounts from the "
-        "user's spending, income, cash-flow, and run-rate totals, but keep them in account "
-        "overviews and upcoming-payment risk checks. Ask for clarification when "
-        "unknown account purpose would materially change the conclusion. "
-        "When the user asks to audit or review their finances, refresh first, verify "
-        "coverage, keep each currency separate, distinguish transfers and card payments "
-        "from true spending, and review balances, cash flow, major drivers, recurring "
-        "obligations, anomalies, and supported follow-up actions. "
-        "Never imply that data outside the reported coverage is present, and explicitly "
-        "disclose stale, missing, or uncategorized data that could materially affect an "
-        "answer. Bank access is read-only. refresh_data updates only the local cache and "
-        "set_account_context updates only local interpretive metadata; all other tools "
-        "are read-only."
+        "Ledgerline is the user's local personal-finance database (single user; "
+        "bank access is read-only). Amounts are exact integer cents; negative means "
+        "money out. Never add amounts across currencies — report each currency "
+        "separately. Account metadata (purpose, entity_name, business_use_percent, "
+        "analysis_treatment, context_note) is authoritative user context: exclude "
+        "monitor_only accounts from spending, income, and cash-flow totals, and ask "
+        "rather than guess when an unknown account purpose would change a conclusion. "
+        "Check data_status when freshness or coverage matters, and disclose stale, "
+        "missing, or uncategorized data that could affect an answer. refresh_data "
+        "writes only the local cache and set_account_context only local metadata; "
+        "every other tool is read-only."
     ),
     json_response=True,
 )
@@ -142,9 +132,12 @@ def _data_status(path: Path | str | None = None, today: date | None = None) -> d
         mappings = conn.execute(
             "SELECT COUNT(*) FROM simplefin_account_map"
         ).fetchone()[0]
-        last_sync_row = conn.execute(
-            "SELECT value FROM sync_state WHERE key = 'simplefin_last_success'"
-        ).fetchone()
+        sync_state = dict(
+            conn.execute(
+                "SELECT key, value FROM sync_state"
+                " WHERE key IN ('simplefin_last_success', 'simplefin_last_attempt')"
+            ).fetchall()
+        )
         unknown_purpose = conn.execute(
             "SELECT COUNT(*) FROM accounts WHERE purpose = 'unknown'"
         ).fetchone()[0]
@@ -166,9 +159,15 @@ def _data_status(path: Path | str | None = None, today: date | None = None) -> d
         )
     if mappings == 0:
         warnings.append("No SimpleFIN account mapping exists; data currently comes from file imports.")
-    last_sync = last_sync_row[0] if last_sync_row else None
-    if not last_sync:
+    last_success = sync_state.get("simplefin_last_success")
+    last_attempt = sync_state.get("simplefin_last_attempt")
+    if not last_success:
         warnings.append("No successful SimpleFIN refresh timestamp is recorded.")
+    elif last_attempt and last_attempt > last_success:
+        warnings.append(
+            "The most recent SimpleFIN refresh reported provider errors; "
+            "recent data may be incomplete."
+        )
     if unknown_purpose:
         warnings.append(
             f"{unknown_purpose} accounts have unknown personal/business purpose; "
@@ -184,7 +183,8 @@ def _data_status(path: Path | str | None = None, today: date | None = None) -> d
         "days_since_latest_transaction": age_days,
         "uncategorized_transactions": uncategorized,
         "simplefin_accounts_mapped": mappings,
-        "simplefin_last_success": last_sync,
+        "simplefin_last_success": last_success,
+        "simplefin_last_attempt": last_attempt,
         "accounts_with_unknown_purpose": unknown_purpose,
         "accounts": accounts,
         "warnings": warnings,
@@ -215,7 +215,7 @@ def _safe_new_account_label(conn: sqlite3.Connection, display_name: str) -> str:
 def refresh_data(force: bool = False) -> dict[str, Any]:
     """Refresh the local cache from SimpleFIN without any bank-side writes.
 
-    Successful refreshes are rate-limited to once per hour unless force=true,
+    Refresh attempts are rate-limited to once per hour unless force=true,
     protecting the provider quota. New accounts receive sanitized local labels.
     """
     from datetime import datetime, timezone
@@ -227,16 +227,17 @@ def refresh_data(force: bool = False) -> dict[str, Any]:
     conn = db.connect(_db_path())
     try:
         row = conn.execute(
-            "SELECT value FROM sync_state WHERE key = 'simplefin_last_success'"
+            "SELECT MAX(value) FROM sync_state"
+            " WHERE key IN ('simplefin_last_attempt', 'simplefin_last_success')"
         ).fetchone()
         now = datetime.now(tz=timezone.utc)
-        if row and not force:
+        if row[0] and not force:
             last = datetime.fromisoformat(row[0])
             if (now - last).total_seconds() < 3600:
                 return {
                     "refreshed": False,
-                    "reason": "Last successful refresh was less than one hour ago.",
-                    "last_success": row[0],
+                    "reason": "Last refresh attempt was less than one hour ago.",
+                    "last_attempt": row[0],
                 }
 
         def resolver(_sfid: str, name: str) -> str:
@@ -401,16 +402,6 @@ def _search_transactions(
         rows = conn.execute(sql, params).fetchall()
     truncated = len(rows) > limit
     return {
-        "filters": {
-            "start_date": start_date,
-            "end_date": end_date,
-            "account": account,
-            "merchant_contains": merchant_contains,
-            "category": category,
-            "currency": currency.upper() if currency else None,
-            "purpose": purpose,
-            "direction": direction,
-        },
         "transactions": [
             {
                 **dict(row),
@@ -471,12 +462,12 @@ def _spending_summary(
     currency: str | None = None,
     purpose: Literal["personal", "business", "mixed", "unknown"] | None = None,
     include_monitor_only: bool = False,
-    limit: int = 50,
+    limit: int | None = 50,
 ) -> dict[str, Any]:
     start, end = _period(start_date, end_date)
     if group_by not in _GROUP_EXPRESSIONS:
         raise ValueError("group_by must be category, merchant, account, purpose, or month")
-    if not 1 <= limit <= 100:
+    if limit is not None and not 1 <= limit <= 100:
         raise ValueError("limit must be between 1 and 100")
 
     clauses = ["t.posted_date >= ?", "t.posted_date <= ?"]
@@ -516,48 +507,26 @@ def _spending_summary(
             " FROM transactions t JOIN accounts a ON a.id = t.account_id"
             f" WHERE {where} AND t.amount_cents < 0"
             " GROUP BY t.currency, 2 ORDER BY t.currency, spent_cents DESC LIMIT ?",
-            [*params, limit],
+            [*params, limit if limit is not None else -1],
         ).fetchall()
-
-    currency_totals = [
-        {
-            "currency": row["currency"],
-            "transaction_count": row["transaction_count"],
-            "spent_cents": row["spent_cents"],
-            "spent": _money(row["spent_cents"]),
-            "income_cents": row["income_cents"],
-            "income": _money(row["income_cents"]),
-            "net_cents": row["net_cents"],
-            "net": _money(row["net_cents"]),
-            "uncategorized_spend_cents": row["uncategorized_spend_cents"],
-            "uncategorized_spend": _money(row["uncategorized_spend_cents"]),
-        }
-        for row in total_rows
-    ]
-    single = currency_totals[0] if len(currency_totals) == 1 else None
 
     return {
         "period": {"start_date": start, "end_date": end},
-        "account": account,
-        "currency_filter": currency.upper() if currency else None,
-        "purpose_filter": purpose,
-        "include_monitor_only": include_monitor_only,
-        "transaction_count": sum(row["transaction_count"] for row in currency_totals),
-        "spent_cents": single["spent_cents"] if single else None,
-        "spent": single["spent"] if single else None,
-        "income_cents": single["income_cents"] if single else None,
-        "income": single["income"] if single else None,
-        "net_cents": single["net_cents"] if single else None,
-        "net": single["net"] if single else None,
-        "uncategorized_spend_cents": (
-            single["uncategorized_spend_cents"] if single else None
-        ),
-        "uncategorized_spend": single["uncategorized_spend"] if single else None,
-        "currency_totals": currency_totals,
-        "warning": (
-            "Multiple currencies are present; use currency_totals or set currency."
-            if len(currency_totals) > 1 else None
-        ),
+        "currency_totals": [
+            {
+                "currency": row["currency"],
+                "transaction_count": row["transaction_count"],
+                "spent_cents": row["spent_cents"],
+                "spent": _money(row["spent_cents"]),
+                "income_cents": row["income_cents"],
+                "income": _money(row["income_cents"]),
+                "net_cents": row["net_cents"],
+                "net": _money(row["net_cents"]),
+                "uncategorized_spend_cents": row["uncategorized_spend_cents"],
+                "uncategorized_spend": _money(row["uncategorized_spend_cents"]),
+            }
+            for row in total_rows
+        ],
         "group_by": group_by,
         "groups": [
             {
@@ -585,9 +554,10 @@ def spending_summary(
 ) -> dict[str, Any]:
     """Summarize exact income, spending, net cash flow, and outflow groups for a period.
 
-    Defaults to the current month through today. Spending values are returned as
-    positive magnitudes; net_cents remains signed. Accounts marked monitor_only
-    are excluded by default. Category results separately report uncategorized spending.
+    Defaults to the current month through today. All totals are per currency
+    and never combined. Spending values are positive magnitudes; net_cents is
+    signed. Accounts marked monitor_only are excluded unless requested, and
+    uncategorized spending is reported separately.
     """
     return _spending_summary(
         start_date=start_date,
@@ -615,8 +585,9 @@ def compare_periods(
 ) -> dict[str, Any]:
     """Compare two inclusive periods using the same exact spending calculations.
 
-    Returns both summaries plus signed changes where positive spending_change_cents
-    means spending increased in the second period.
+    Returns both summaries plus signed per-currency changes where positive
+    spending_change_cents means spending increased in the second period.
+    Group changes are computed over every group in either period.
     """
     first = _spending_summary(
         start_date=first_start,
@@ -626,6 +597,7 @@ def compare_periods(
         currency=currency,
         purpose=purpose,
         include_monitor_only=include_monitor_only,
+        limit=None,
     )
     second = _spending_summary(
         start_date=second_start,
@@ -635,6 +607,7 @@ def compare_periods(
         currency=currency,
         purpose=purpose,
         include_monitor_only=include_monitor_only,
+        limit=None,
     )
     first_groups = {
         (row["currency"], row["label"]): row["spent_cents"] for row in first["groups"]
@@ -673,16 +646,12 @@ def compare_periods(
                 "income_change": _money(income_change),
             }
         )
-    one_change = currency_changes[0] if len(currency_changes) == 1 else None
     return {
         "first": first,
         "second": second,
-        "spending_change_cents": one_change["spending_change_cents"] if one_change else None,
-        "spending_change": one_change["spending_change"] if one_change else None,
-        "income_change_cents": one_change["income_change_cents"] if one_change else None,
-        "income_change": one_change["income_change"] if one_change else None,
         "currency_changes": currency_changes,
-        "group_changes": changes,
+        "group_changes": changes[:100],
+        "group_changes_truncated": len(changes) > 100,
     }
 
 
@@ -733,11 +702,20 @@ def upcoming_payments(days: int = 30) -> dict[str, Any]:
 
 @mcp.tool(annotations=READ_ONLY, structured_output=True)
 def raw_sql(sql: str) -> dict[str, Any]:
-    """Run one advanced read-only SELECT/WITH query, capped at 200 rows.
+    """Run one advanced read-only SELECT/WITH query (200-row cap, 5s time limit).
 
-    Use structured tools first. Money is stored in signed integer amount_cents;
-    posted_date is ISO YYYY-MM-DD. Writes, PRAGMAs, attachment, and multiple
-    statements are rejected by validation, SQLite authorization, and read-only mode.
+    Use structured tools first. Money is signed integer amount_cents (negative =
+    outflow); posted_date is ISO YYYY-MM-DD text. Main tables:
+    transactions(id, account_id, posted_date, amount_cents, currency, merchant_raw,
+    merchant_clean, category, recurring_group_id, external_id);
+    accounts(id, name, institution, type, currency, balance_cents,
+    available_balance_cents, balance_date, purpose, entity_name,
+    business_use_percent, analysis_treatment, context_note);
+    recurring_groups(id, label, expected_amount_cents, cadence, expected_day,
+    merchant_clean, account_id, currency, active);
+    merchant_category_cache(merchant_clean, category, source, confirmed).
+    Writes, PRAGMAs, attachment, and multiple statements are rejected by
+    validation, SQLite authorization, and the read-only connection.
     """
     with closing(_connect()) as conn:
         return run_sql(conn, sql)

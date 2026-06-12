@@ -30,7 +30,16 @@ when history is stale, incomplete, or uncategorized.
 
 `refresh_data` can update the local cache from SimpleFIN when current data is
 needed. SimpleFIN itself remains read-only; this tool only writes the local
-SQLite cache and rate-limits successful refreshes to once per hour by default.
+SQLite cache and rate-limits refresh attempts to once per hour by default. A
+refresh that completes with provider errors is recorded as an attempt but not
+a success, and `data_status` discloses the difference.
+
+The tool contract is deliberately small and uniform: every money figure is an
+exact integer-cent value scoped to one currency (plus a formatted string),
+totals are always lists keyed by currency, and limitations (staleness,
+uncategorized spend, unknown account purpose) are reported as data rather
+than baked into prescriptive workflow text. The reasoning is the client
+model's job; the server's job is exact, truthful primitives.
 
 ```sh
 # Codex (user scope)
@@ -122,8 +131,9 @@ from the same institution).
 
 ## Security invariants
 
-- `data/`, `*.db`, `*.csv`, `*.ofx`, `*.qfx`, `.env` gitignored from the
-  first commit; test fixtures are fabricated data only.
+- `data/`, `*.db`, `*.csv`, `*.ofx`, `*.qfx`, `.env`, `analysis/`, and
+  `*.ipynb` gitignored from the first commit; test fixtures are fabricated
+  data only.
 - Account numbers are never parsed: the OFX reader and SimpleFIN connector
   drop `ACCTID`/`BANKID`-class fields at parse time. Only short labels
   ("US Checking") identify accounts. Asserted in `tests/test_security.py`.
@@ -132,9 +142,14 @@ from the same institution).
   credentials, raw export files.
 - `run_sql`: read-only connection (`mode=ro` URI), single-statement
   SELECT/WITH only, keyword denylist, SQLite authorizer denying everything
-  but reads, 200-row cap enforced server-side. Tested with hostile inputs.
-- SimpleFIN access URL from `SIMPLEFIN_ACCESS_URL` or `.env` only — never
-  the repo, the DB, or the LLM context.
+  but reads, 200-row cap and a 5-second time limit enforced server-side.
+  String literals and comments are stripped before the keyword scan, so a
+  merchant named "UPDATE" doesn't false-positive — the authorizer and
+  read-only mode remain the real guards. Tested with hostile inputs.
+- SimpleFIN access URL from `SIMPLEFIN_ACCESS_URL` or a `0600` config file
+  only — never the repo, the DB, or the LLM context. `https` is required;
+  loose file permissions produce a warning.
+- New database files are created owner-only (`0600`).
 - `ANTHROPIC_API_KEY` from env only; LLM steps fail loudly without it,
   everything else runs keyless.
 
@@ -161,6 +176,12 @@ uv run pytest
 
 Tests cover the acceptance checklist: double-import and overlap
 idempotency, mixed-mode dedupe in both orders, quarantine of malformed rows,
-integer-cents money math, keyless operation, `run_sql` hardening, recurring
-detection + manual groups, MCP query tools, and the no-account-numbers/no-tokens
+integer-cents money math, per-currency summaries, keyless operation,
+`run_sql` hardening (hostile inputs, literals, time limit), recurring
+detection with gap tolerance, manual groups, MCP query tools, sync
+attempt-vs-success bookkeeping, and the no-account-numbers/no-tokens/0600
 invariants.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

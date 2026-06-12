@@ -58,9 +58,11 @@ def test_spending_summary_uses_positive_spend_and_exact_cents(populated_db):
         group_by="category",
     )
 
-    assert result["spent_cents"] == 132214
-    assert result["income_cents"] == 350000
-    assert result["net_cents"] == 217786
+    totals = result["currency_totals"]
+    assert len(totals) == 1 and totals[0]["currency"] == "USD"
+    assert totals[0]["spent_cents"] == 132214
+    assert totals[0]["income_cents"] == 350000
+    assert totals[0]["net_cents"] == 217786
     assert sum(row["spent_cents"] for row in result["groups"]) == 132214
 
 
@@ -88,21 +90,23 @@ def test_spending_summary_never_adds_currencies(conn, db_file):
         db_file, start_date="2026-01-01", end_date="2026-01-31"
     )
 
-    assert result["spent_cents"] is None
-    assert result["warning"].startswith("Multiple currencies")
+    # No combined top-level totals exist; every figure is inside its currency.
+    assert "spent_cents" not in result
     assert {
         row["currency"]: row["spent_cents"] for row in result["currency_totals"]
     } == {"CAD": 20000, "USD": 10000}
 
 
-def test_refresh_skips_recent_success_without_network(db_file, monkeypatch):
+@pytest.mark.parametrize(
+    "key", ["simplefin_last_success", "simplefin_last_attempt"]
+)
+def test_refresh_skips_recent_attempt_without_network(db_file, monkeypatch, key):
     from ledgerline import db
 
     conn = db.connect(db_file)
     now = datetime.now(tz=timezone.utc).isoformat()
     conn.execute(
-        "INSERT INTO sync_state (key, value) VALUES ('simplefin_last_success', ?)",
-        (now,),
+        "INSERT INTO sync_state (key, value) VALUES (?, ?)", (key, now)
     )
     conn.commit()
     conn.close()
@@ -112,6 +116,24 @@ def test_refresh_skips_recent_success_without_network(db_file, monkeypatch):
 
     assert result["refreshed"] is False
     assert "less than one hour" in result["reason"]
+
+
+def test_data_status_flags_refresh_with_provider_errors(db_file):
+    from ledgerline import db
+
+    conn = db.connect(db_file)
+    conn.execute(
+        "INSERT INTO sync_state (key, value) VALUES"
+        " ('simplefin_last_success', '2026-06-10T00:00:00+00:00'),"
+        " ('simplefin_last_attempt', '2026-06-11T00:00:00+00:00')"
+    )
+    conn.commit()
+    conn.close()
+
+    status = _data_status(db_file, today=date(2026, 6, 11))
+
+    assert status["simplefin_last_attempt"] > status["simplefin_last_success"]
+    assert any("provider errors" in warning for warning in status["warnings"])
 
 
 def test_mcp_account_context_and_purpose_filter(conn, db_file, monkeypatch):
@@ -151,5 +173,37 @@ def test_mcp_account_context_and_purpose_filter(conn, db_file, monkeypatch):
 
     assert updated["business_use_percent"] == 100
     assert updated["entity_name"] == "Northwind Consulting"
-    assert result["spent_cents"] == 10000
-    assert result["purpose_filter"] == "business"
+    assert result["currency_totals"] == [
+        {
+            "currency": "CAD",
+            "transaction_count": 1,
+            "spent_cents": 10000,
+            "spent": "$100.00",
+            "income_cents": 0,
+            "income": "$0.00",
+            "net_cents": -10000,
+            "net": "-$100.00",
+            "uncategorized_spend_cents": 10000,
+            "uncategorized_spend": "$100.00",
+        }
+    ]
+
+
+def test_compare_periods_covers_all_groups(populated_db, monkeypatch):
+    from ledgerline.mcp_server import compare_periods
+
+    monkeypatch.setenv("LEDGERLINE_DB", str(populated_db))
+    result = compare_periods(
+        first_start="2026-01-01",
+        first_end="2026-01-31",
+        second_start="2026-02-01",
+        second_end="2026-02-28",
+        group_by="merchant",
+    )
+
+    # January had spending, February none: every group change is negative and
+    # group changes cover the full January merchant list, not a top-N slice.
+    assert result["group_changes_truncated"] is False
+    assert len(result["group_changes"]) == len(result["first"]["groups"])
+    assert all(c["spending_change_cents"] < 0 for c in result["group_changes"])
+    assert result["currency_changes"][0]["spending_change_cents"] == -132214
