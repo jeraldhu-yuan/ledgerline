@@ -35,7 +35,9 @@ def test_no_account_numbers_anywhere_in_db(conn):
 def test_gitignore_blocks_data_from_first_commit():
     gitignore = (REPO_ROOT / ".gitignore").read_text().splitlines()
     patterns = {line.strip() for line in gitignore if line.strip()}
-    for required in ("data/", "*.db", "*.csv", "*.ofx", "*.qfx", ".env"):
+    for required in (
+        "data/", "*.db", "*.csv", "*.ofx", "*.qfx", ".env", "analysis/", "*.ipynb",
+    ):
         assert required in patterns, f".gitignore must contain {required}"
 
 

@@ -9,6 +9,10 @@ data/
 *.qfx
 .env
 
+# Analysis notebooks carry real query output — never committable
+analysis/
+*.ipynb
+
 # Test fixtures are the one sanctioned exception: fabricated data only
 !tests/fixtures/*.csv
 !tests/fixtures/*.ofx
