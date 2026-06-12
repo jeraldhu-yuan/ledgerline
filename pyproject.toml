@@ -1,7 +1,9 @@
 [project]
 name = "ledgerline"
-version = "0.1.0"
-description = "Local-first personal finance tracker: ingest bank exports, categorize, detect recurring, ask questions"
+version = "0.2.0"
+description = "Local-first personal finance pipeline: ingest bank exports, categorize, detect recurring payments, and expose read-only finance tools to AI agents over MCP"
+readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.11"
 dependencies = [
     "click>=8.1",
