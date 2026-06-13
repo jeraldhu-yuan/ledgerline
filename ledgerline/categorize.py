@@ -161,12 +161,14 @@ def categorize_llm(conn: sqlite3.Connection, merchants: list[str]) -> int:
     return apply_cache(conn)
 
 
-def set_manual(conn: sqlite3.Connection, merchant_clean: str, category: str) -> int:
-    """Manual correction: cache as confirmed and retroactively recategorize
-    ALL matching transactions, not just uncategorized ones."""
+def set_manual(conn: sqlite3.Connection, merchant_clean: str, category: str,
+               confirmed: int = 1) -> int:
+    """Manual correction: cache (confirmed by default) and retroactively
+    recategorize ALL matching transactions, not just uncategorized ones.
+    confirmed=0 keeps the entry queued for `review` (agent-inferred)."""
     if category not in TAXONOMY:
         raise ValueError(f"{category!r} is not in the taxonomy")
-    _cache_put(conn, merchant_clean, category, "manual", confirmed=1)
+    _cache_put(conn, merchant_clean, category, "manual", confirmed=confirmed)
     cur = conn.execute(
         "UPDATE transactions SET category = ? WHERE merchant_clean = ?",
         (category, merchant_clean),

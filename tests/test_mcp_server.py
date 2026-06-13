@@ -189,6 +189,91 @@ def test_mcp_account_context_and_purpose_filter(conn, db_file, monkeypatch):
     ]
 
 
+def test_set_merchant_categories_applies_retroactively(populated_db, monkeypatch):
+    from ledgerline import db
+    from ledgerline.mcp_server import set_merchant_categories
+
+    monkeypatch.setenv("LEDGERLINE_DB", str(populated_db))
+    # "Zimberly Office Supply Co" is uncategorized in the fixture
+    result = set_merchant_categories(
+        {"Zimberly Office Supply Co": "professional", "No Such Merchant": "other"}
+    )
+
+    assert result["transactions_recategorized"]["Zimberly Office Supply Co"] == 1
+    assert result["merchants_with_zero_matches"] == ["No Such Merchant"]
+    conn = db.connect(populated_db)
+    row = conn.execute(
+        "SELECT category FROM transactions WHERE merchant_clean = 'Zimberly Office Supply Co'"
+    ).fetchone()
+    cache = conn.execute(
+        "SELECT confirmed FROM merchant_category_cache"
+        " WHERE merchant_clean = 'Zimberly Office Supply Co'"
+    ).fetchone()
+    conn.close()
+    assert row["category"] == "professional"
+    assert cache["confirmed"] == 1
+
+
+def test_set_merchant_categories_unconfirmed_stays_reviewable(populated_db, monkeypatch):
+    from ledgerline import db
+    from ledgerline.categorize import unconfirmed
+    from ledgerline.mcp_server import set_merchant_categories
+
+    monkeypatch.setenv("LEDGERLINE_DB", str(populated_db))
+    set_merchant_categories(
+        {"Zimberly Office Supply Co": "shopping"}, confirmed=False
+    )
+
+    conn = db.connect(populated_db)
+    queued = [r["merchant_clean"] for r in unconfirmed(conn)]
+    conn.close()
+    assert "Zimberly Office Supply Co" in queued
+
+
+def test_set_merchant_categories_rejects_off_taxonomy(populated_db, monkeypatch):
+    from ledgerline.mcp_server import set_merchant_categories
+
+    monkeypatch.setenv("LEDGERLINE_DB", str(populated_db))
+    with pytest.raises(ValueError, match="not in the taxonomy"):
+        set_merchant_categories({"Zimberly Office Supply Co": "splurges"})
+    with pytest.raises(ValueError, match="must not be empty"):
+        set_merchant_categories({})
+
+
+def test_update_recurring_payment_deactivates(db_file, monkeypatch):
+    from ledgerline.mcp_server import (
+        add_recurring_payment,
+        update_recurring_payment,
+        upcoming_payments,
+    )
+
+    monkeypatch.setenv("LEDGERLINE_DB", str(db_file))
+    add_recurring_payment("Flixburrow.com", 1549, cadence="monthly", expected_day=7)
+    assert upcoming_payments(days=45)["payments"]
+
+    result = update_recurring_payment("Flixburrow.com", active=False)
+
+    assert result["active"] is False
+    assert result["next_expected_date"] is None
+    assert upcoming_payments(days=45)["payments"] == []
+
+
+def test_update_recurring_payment_changes_amount_and_validates(db_file, monkeypatch):
+    from ledgerline.mcp_server import add_recurring_payment, update_recurring_payment
+
+    monkeypatch.setenv("LEDGERLINE_DB", str(db_file))
+    add_recurring_payment("Rent", 185000, cadence="monthly", expected_day=1)
+
+    result = update_recurring_payment("Rent", expected_amount_cents=195000)
+    assert result["expected_amount_cents"] == -195000
+    assert result["active"] is True
+
+    with pytest.raises(ValueError, match="no recurring payment labeled"):
+        update_recurring_payment("Not A Thing", active=False)
+    with pytest.raises(ValueError, match="nothing to update"):
+        update_recurring_payment("Rent")
+
+
 def test_add_recurring_payment_appears_in_upcoming(db_file, monkeypatch):
     from ledgerline.mcp_server import add_recurring_payment, upcoming_payments
 

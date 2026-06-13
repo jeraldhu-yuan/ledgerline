@@ -56,9 +56,10 @@ mcp = FastMCP(
         "rather than guess when an unknown account purpose would change a conclusion. "
         "Check data_status when freshness or coverage matters, and disclose stale, "
         "missing, or uncategorized data that could affect an answer. refresh_data "
-        "writes only the local cache; set_account_context and "
-        "add_recurring_payment write only local metadata; every other tool is "
-        "read-only. Nothing here can touch the bank."
+        "writes only the local cache; set_account_context, "
+        "set_merchant_categories, add_recurring_payment, and "
+        "update_recurring_payment write only local metadata; every other tool "
+        "is read-only. Nothing here can touch the bank."
     ),
     json_response=True,
 )
@@ -653,6 +654,153 @@ def compare_periods(
         "currency_changes": currency_changes,
         "group_changes": changes[:100],
         "group_changes_truncated": len(changes) > 100,
+    }
+
+
+@mcp.tool(annotations=LOCAL_METADATA, structured_output=True)
+def set_merchant_categories(
+    assignments: dict[str, str],
+    confirmed: bool = True,
+) -> dict[str, Any]:
+    """Categorize or recategorize merchants, retroactively across all their transactions.
+
+    Keys are exact merchant_clean values (as returned by search_transactions;
+    find merchants needing attention with category="(uncategorized)"). Values
+    must be from the fixed taxonomy: housing, utilities, groceries, dining,
+    transport, health, fitness, insurance, subscriptions, professional,
+    travel, shopping, entertainment, income, transfers, fees, taxes, other.
+    Use confirmed=true when relaying the user's explicit correction;
+    confirmed=false for your own inference, which stays queued for the user's
+    review. Writes only the local merchant cache, never bank data.
+    """
+    from ledgerline.categorize import TAXONOMY, set_manual
+
+    if not assignments:
+        raise ValueError("assignments must not be empty")
+    invalid = sorted({c for c in assignments.values() if c not in TAXONOMY})
+    if invalid:
+        raise ValueError(
+            f"not in the taxonomy: {', '.join(invalid)}"
+            f" (valid: {', '.join(TAXONOMY)})"
+        )
+    conn = db.connect(_db_path())
+    try:
+        updated = {
+            merchant: set_manual(conn, merchant, category, confirmed=int(confirmed))
+            for merchant, category in assignments.items()
+        }
+        remaining = [
+            r["merchant_clean"]
+            for r in conn.execute(
+                "SELECT DISTINCT merchant_clean FROM transactions"
+                " WHERE category IS NULL AND merchant_clean IS NOT NULL"
+                " ORDER BY merchant_clean LIMIT 50"
+            )
+        ]
+    finally:
+        conn.close()
+    return {
+        "transactions_recategorized": updated,
+        "merchants_with_zero_matches": sorted(
+            merchant for merchant, n in updated.items() if n == 0
+        ),
+        "uncategorized_merchants_remaining": remaining,
+    }
+
+
+@mcp.tool(annotations=LOCAL_METADATA, structured_output=True)
+def update_recurring_payment(
+    label: str,
+    account: str | None = None,
+    active: bool | None = None,
+    expected_amount_cents: int | None = None,
+    expected_day: int | None = None,
+    cadence: Literal["monthly", "weekly", "annual", "irregular"] | None = None,
+) -> dict[str, Any]:
+    """Update or deactivate a tracked recurring payment by its exact label.
+
+    Use active=false when the user cancels a subscription or finishes an
+    installment plan, so upcoming_payments stops projecting it; amounts are
+    exact integer cents, stored as outflows regardless of sign. Labels come
+    from upcoming_payments. Pass account to disambiguate when two accounts
+    track the same label. Writes only local metadata, never bank data.
+    """
+    if all(v is None for v in (active, expected_amount_cents, expected_day, cadence)):
+        raise ValueError(
+            "nothing to update: pass active, expected_amount_cents,"
+            " expected_day, or cadence"
+        )
+    if expected_amount_cents == 0:
+        raise ValueError("expected_amount_cents must be nonzero")
+    if expected_day is not None and not 1 <= expected_day <= 31:
+        raise ValueError("expected_day must be between 1 and 31")
+
+    conn = db.connect(_db_path())
+    try:
+        clauses, params = ["r.label = ?"], [label]
+        if account:
+            clauses.append("a.name = ?")
+            params.append(account)
+        rows = conn.execute(
+            "SELECT r.id, a.name account FROM recurring_groups r"
+            " LEFT JOIN accounts a ON a.id = r.account_id"
+            f" WHERE {' AND '.join(clauses)}",
+            params,
+        ).fetchall()
+        if not rows:
+            labels = [
+                r["label"] for r in conn.execute(
+                    "SELECT DISTINCT label FROM recurring_groups ORDER BY label"
+                )
+            ]
+            raise ValueError(
+                f"no recurring payment labeled {label!r}; "
+                f"existing labels: {', '.join(labels) or '(none)'}"
+            )
+        if len(rows) > 1:
+            accounts = ", ".join(str(r["account"]) for r in rows)
+            raise ValueError(
+                f"{len(rows)} recurring payments share the label {label!r}"
+                f" (accounts: {accounts}); pass account to disambiguate"
+            )
+        sets, values = [], []
+        if active is not None:
+            sets.append("active = ?")
+            values.append(int(active))
+        if expected_amount_cents is not None:
+            sets.append("expected_amount_cents = ?")
+            values.append(-abs(expected_amount_cents))
+        if expected_day is not None:
+            sets.append("expected_day = ?")
+            values.append(expected_day)
+        if cadence is not None:
+            sets.append("cadence = ?")
+            values.append(cadence)
+        conn.execute(
+            f"UPDATE recurring_groups SET {', '.join(sets)} WHERE id = ?",
+            [*values, rows[0]["id"]],
+        )
+        conn.commit()
+        group = conn.execute(
+            "SELECT r.*, a.name account FROM recurring_groups r"
+            " LEFT JOIN accounts a ON a.id = r.account_id WHERE r.id = ?",
+            (rows[0]["id"],),
+        ).fetchone()
+        projected = [
+            e for e in upcoming(conn, days=366) if e["label"] == group["label"]
+        ]
+    finally:
+        conn.close()
+    return {
+        "label": group["label"],
+        "active": bool(group["active"]),
+        "expected_amount_cents": group["expected_amount_cents"],
+        "expected_amount": _money(group["expected_amount_cents"]),
+        "cadence": group["cadence"],
+        "expected_day": group["expected_day"],
+        "account": group["account"],
+        "currency": group["currency"],
+        "next_expected_date": projected[0]["date"] if projected else None,
     }
 
 

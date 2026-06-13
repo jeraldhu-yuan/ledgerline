@@ -1,6 +1,6 @@
 """ledgerline — local-first personal finance tracker."""
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"
 
 
 class LedgerlineError(Exception):

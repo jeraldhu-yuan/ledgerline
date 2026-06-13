@@ -79,10 +79,12 @@ optional embedded LLM commands (`categorize`, `ask`) read
 
 Ledgerline runs as a local stdio MCP server exposing read-only tools: data
 freshness, transaction search, spending summaries, period comparisons,
-account balances, upcoming payments, and constrained SQL — plus two
-local-metadata writers, so "I just signed up for a $850/month course,
-track it" and "mark this card as business" work from chat. Nothing can
-touch the bank. The contract is
+account balances, upcoming payments, and constrained SQL — plus a small
+set of local-metadata writers so the everyday upkeep works from chat:
+"I just signed up for a $850/month course, track it", "I cancelled
+Netflix", "that charge is business travel, not dining", "mark this card
+as business". Your agent does the categorizing too, so no Anthropic API
+key is needed on the MCP path. Nothing can touch the bank. The contract is
 deliberately small and uniform — exact integer cents, totals always per
 currency and never combined, and limitations (staleness, uncategorized
 spend, unknown account purpose) reported as data rather than prescriptive
