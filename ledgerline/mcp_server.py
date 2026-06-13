@@ -56,8 +56,9 @@ mcp = FastMCP(
         "rather than guess when an unknown account purpose would change a conclusion. "
         "Check data_status when freshness or coverage matters, and disclose stale, "
         "missing, or uncategorized data that could affect an answer. refresh_data "
-        "writes only the local cache and set_account_context only local metadata; "
-        "every other tool is read-only."
+        "writes only the local cache; set_account_context and "
+        "add_recurring_payment write only local metadata; every other tool is "
+        "read-only. Nothing here can touch the bank."
     ),
     json_response=True,
 )
@@ -652,6 +653,85 @@ def compare_periods(
         "currency_changes": currency_changes,
         "group_changes": changes[:100],
         "group_changes_truncated": len(changes) > 100,
+    }
+
+
+@mcp.tool(annotations=LOCAL_METADATA, structured_output=True)
+def add_recurring_payment(
+    label: str,
+    expected_amount_cents: int,
+    cadence: Literal["monthly", "weekly", "annual", "irregular"] = "monthly",
+    expected_day: int | None = None,
+    merchant: str | None = None,
+    account: str | None = None,
+    currency: str | None = None,
+) -> dict[str, Any]:
+    """Register a known upcoming charge so upcoming_payments warns about it.
+
+    Use when the user mentions a new payment obligation (installment plan,
+    new subscription, lease) with fewer than three charges so far — recurring
+    detection needs three occurrences, and this covers the gap. Established
+    patterns are detected automatically on refresh; do not duplicate them.
+    Writes only local metadata, never bank data. expected_amount_cents is
+    exact integer cents and is always stored as an outflow regardless of
+    sign. expected_day is the day of month (monthly cadence only). merchant,
+    when given, links existing matching transactions (merchant_clean) to the
+    new group.
+    """
+    from ledgerline.recurring import add_manual_group
+
+    if expected_amount_cents == 0:
+        raise ValueError("expected_amount_cents must be nonzero")
+    if expected_day is not None and not 1 <= expected_day <= 31:
+        raise ValueError("expected_day must be between 1 and 31")
+
+    conn = db.connect(_db_path())
+    try:
+        account_id = None
+        if account:
+            row = conn.execute(
+                "SELECT id, currency FROM accounts WHERE name = ?", (account,)
+            ).fetchone()
+            if not row:
+                names = [r["name"] for r in conn.execute("SELECT name FROM accounts ORDER BY name")]
+                raise ValueError(
+                    f"unknown account {account!r}; existing accounts: "
+                    f"{', '.join(names) or '(none)'}"
+                )
+            account_id = row["id"]
+            currency = currency or row["currency"]
+        group_id = add_manual_group(
+            conn,
+            label,
+            -abs(expected_amount_cents),
+            cadence,
+            expected_day=expected_day,
+            merchant_clean=merchant,
+            account_id=account_id,
+            currency=currency.upper() if currency else None,
+        )
+        group = conn.execute(
+            "SELECT r.*, a.name account FROM recurring_groups r"
+            " LEFT JOIN accounts a ON a.id = r.account_id WHERE r.id = ?",
+            (group_id,),
+        ).fetchone()
+        linked = conn.execute(
+            "SELECT COUNT(*) FROM transactions WHERE recurring_group_id = ?",
+            (group_id,),
+        ).fetchone()[0]
+        projected = [e for e in upcoming(conn, days=366) if e["label"] == label]
+    finally:
+        conn.close()
+    return {
+        "label": group["label"],
+        "expected_amount_cents": group["expected_amount_cents"],
+        "expected_amount": _money(group["expected_amount_cents"]),
+        "cadence": group["cadence"],
+        "expected_day": group["expected_day"],
+        "account": group["account"],
+        "currency": group["currency"],
+        "linked_transactions": linked,
+        "next_expected_date": projected[0]["date"] if projected else None,
     }
 
 

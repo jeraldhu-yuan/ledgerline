@@ -79,7 +79,10 @@ optional embedded LLM commands (`categorize`, `ask`) read
 
 Ledgerline runs as a local stdio MCP server exposing read-only tools: data
 freshness, transaction search, spending summaries, period comparisons,
-account balances, upcoming payments, and constrained SQL. The contract is
+account balances, upcoming payments, and constrained SQL — plus two
+local-metadata writers, so "I just signed up for a $850/month course,
+track it" and "mark this card as business" work from chat. Nothing can
+touch the bank. The contract is
 deliberately small and uniform — exact integer cents, totals always per
 currency and never combined, and limitations (staleness, uncategorized
 spend, unknown account purpose) reported as data rather than prescriptive

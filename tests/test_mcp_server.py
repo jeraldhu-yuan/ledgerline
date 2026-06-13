@@ -189,6 +189,65 @@ def test_mcp_account_context_and_purpose_filter(conn, db_file, monkeypatch):
     ]
 
 
+def test_add_recurring_payment_appears_in_upcoming(db_file, monkeypatch):
+    from ledgerline.mcp_server import add_recurring_payment, upcoming_payments
+
+    monkeypatch.setenv("LEDGERLINE_DB", str(db_file))
+    result = add_recurring_payment(
+        "Course tuition installment", 85000, cadence="monthly", expected_day=21
+    )
+
+    # stored as an outflow even though the input was positive
+    assert result["expected_amount_cents"] == -85000
+    assert result["expected_amount"] == "-$850.00"
+    assert result["next_expected_date"] is not None
+
+    payments = upcoming_payments(days=45)
+    labels = [p["label"] for p in payments["payments"]]
+    assert "Course tuition installment" in labels
+
+
+def test_add_recurring_payment_links_existing_merchant(db_file, monkeypatch):
+    from ledgerline import db
+    from ledgerline.ingest import get_or_create_account, insert_transactions
+    from ledgerline.ingest.types import ParsedTxn
+    from ledgerline.mcp_server import add_recurring_payment
+
+    conn = db.connect(db_file)
+    account_id = get_or_create_account(conn, "US Checking")
+    insert_transactions(
+        conn, account_id,
+        [
+            ParsedTxn("2026-04-21", -85000, "BRIGHTSTONE TRAINING LLC"),
+            ParsedTxn("2026-05-21", -85000, "BRIGHTSTONE TRAINING LLC"),
+        ],
+        "seed",
+    )
+    conn.close()
+    monkeypatch.setenv("LEDGERLINE_DB", str(db_file))
+
+    result = add_recurring_payment(
+        "Brightstone installment", 85000, cadence="monthly",
+        expected_day=21, merchant="Brightstone Training Llc",
+    )
+
+    assert result["linked_transactions"] == 2
+    assert result["account"] == "US Checking"
+    assert result["currency"] == "USD"
+
+
+def test_add_recurring_payment_validates_inputs(db_file, monkeypatch):
+    from ledgerline.mcp_server import add_recurring_payment
+
+    monkeypatch.setenv("LEDGERLINE_DB", str(db_file))
+    with pytest.raises(ValueError, match="nonzero"):
+        add_recurring_payment("X", 0)
+    with pytest.raises(ValueError, match="between 1 and 31"):
+        add_recurring_payment("X", 1000, expected_day=0)
+    with pytest.raises(ValueError, match="unknown account"):
+        add_recurring_payment("X", 1000, account="No Such Account")
+
+
 def test_compare_periods_covers_all_groups(populated_db, monkeypatch):
     from ledgerline.mcp_server import compare_periods
 
