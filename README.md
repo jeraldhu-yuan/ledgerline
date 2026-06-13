@@ -12,21 +12,9 @@ move money. Account numbers are dropped at parse time, so the model can
 never see what the database never contains. Delete the one `.db` file and
 every trace is gone.
 
-<!-- demo.gif goes here
+![ledgerline demo: seed fabricated data, then summary and upcoming](docs/demo.gif)
 
-Record this 60-second flow (terminal at ~100x30, then your MCP client):
-  1. (0:00) In an empty directory: `uvx --from ledgerline ledgerline demo`
-     — let the seed summary and "Try these next" block render.
-  2. (0:10) `uvx --from ledgerline ledgerline summary`
-     — pause ~3s on the category table.
-  3. (0:20) `uvx --from ledgerline ledgerline upcoming`
-     — pause ~3s on the expected-charges table.
-  4. (0:30) Paste the `claude mcp add ...` one-liner printed by the demo.
-  5. (0:35) Open Claude Code and ask: "What recurring charges are coming up,
-     and can my checking balance cover them?" — show the answer citing
-     exact amounts from the upcoming_payments tool.
-  6. (0:55) End on the answer.
--->
+<!-- Re-record with vhs: see docs/demo.tape -->
 
 ## Try it in 90 seconds
 
