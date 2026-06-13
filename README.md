@@ -2,16 +2,52 @@
 
 [![CI](https://github.com/jeraldhu-yuan/ledgerline/actions/workflows/ci.yml/badge.svg)](https://github.com/jeraldhu-yuan/ledgerline/actions/workflows/ci.yml)
 
-Local-first personal finance pipeline: sync transactions read-only via
-SimpleFIN Bridge (or import bank exports by hand), categorize them, detect
-recurring payments, and expose exact, truthful finance tools to AI agents
-over MCP. Single user, one SQLite file, no cloud — your banking credentials
-never touch this tool.
+Give AI agents read-only access to your finances without giving anyone your
+data: one SQLite file on your machine, no cloud, exact integer-cent answers
+over MCP.
 
-## Quick start
+Everything runs locally. Bank access (via SimpleFIN Bridge) is read-only by
+construction — Ledgerline never sees your banking credentials and cannot
+move money. Account numbers are dropped at parse time, so the model can
+never see what the database never contains. Delete the one `.db` file and
+every trace is gone.
 
-[uv](https://docs.astral.sh/uv/getting-started/installation/) is the only
-prerequisite.
+<!-- demo.gif goes here
+
+Record this 60-second flow (terminal at ~100x30, then your MCP client):
+  1. (0:00) In an empty directory: `uvx --from ledgerline ledgerline demo`
+     — let the seed summary and "Try these next" block render.
+  2. (0:10) `uvx --from ledgerline ledgerline summary`
+     — pause ~3s on the category table.
+  3. (0:20) `uvx --from ledgerline ledgerline upcoming`
+     — pause ~3s on the expected-charges table.
+  4. (0:30) Paste the `claude mcp add ...` one-liner printed by the demo.
+  5. (0:35) Open Claude Code and ask: "What recurring charges are coming up,
+     and can my checking balance cover them?" — show the answer citing
+     exact amounts from the upcoming_payments tool.
+  6. (0:55) End on the answer.
+-->
+
+## Try it in 90 seconds
+
+No clone, no signup, no API key, no real financial data — the demo seeds six
+months of clearly fabricated transactions so you can evaluate everything
+before connecting anything. [uv](https://docs.astral.sh/uv/getting-started/installation/)
+is the only prerequisite.
+
+```sh
+uvx --from ledgerline ledgerline demo
+uvx --from ledgerline ledgerline summary    # income/outflow by category
+uvx --from ledgerline ledgerline upcoming   # expected charges, next 30 days
+```
+
+`demo` prints copy-paste one-liners that connect the MCP server to Codex or
+Claude Code; then ask things like "What recurring charges are coming up?" or
+"Why was last month so expensive?". When you're done evaluating, delete
+`data/ledgerline.db` and start fresh with real data below. (`demo` refuses
+to write into a database that already has transactions.)
+
+## Quick start with real data
 
 ```sh
 git clone https://github.com/jeraldhu-yuan/ledgerline
@@ -68,15 +104,19 @@ but not a success, and `data_status` discloses the difference.
 
 ```sh
 # Codex (user scope)
-codex mcp add ledgerline -- /absolute/path/to/ledgerline/.venv/bin/ledgerline-mcp
+codex mcp add ledgerline --env LEDGERLINE_DB=/absolute/path/to/ledgerline.db -- \
+  uvx --from ledgerline ledgerline-mcp
 
 # Claude Code (user scope)
-claude mcp add --scope user --transport stdio ledgerline -- \
-  /absolute/path/to/ledgerline/.venv/bin/ledgerline-mcp
+claude mcp add --scope user --transport stdio \
+  --env LEDGERLINE_DB=/absolute/path/to/ledgerline.db ledgerline -- \
+  uvx --from ledgerline ledgerline-mcp
 ```
 
-Restart the client, then ask things like “How much did I spend on dining in
-January?” or “What recurring charges are coming up?”
+(From a repo checkout, point the command at
+`/path/to/ledgerline/.venv/bin/ledgerline-mcp` instead of `uvx`.) Restart
+the client, then ask things like "How much did I spend on dining in
+January?" or "What recurring charges are coming up?"
 
 ## Usage
 
@@ -112,9 +152,27 @@ Account context (`personal`/`business`/`mixed`/`unknown`, owning entity,
 business-use percentage, free-form note) persists in SQLite and rides along
 on every MCP result, so agents segment cash flow before judging it.
 
-**Bank profiles.** A CSV profile is a small dict in
-`ledgerline/ingest/profiles.py`: column names, date format, sign convention,
-rows to skip. Two examples ship configured; OFX/QFX needs no profile.
+## Contributing a bank profile
+
+If your bank's CSV doesn't auto-detect, the fix is a ~10-line pull request:
+add one dict to `PROFILES` in
+[`ledgerline/ingest/profiles.py`](ledgerline/ingest/profiles.py). OFX/QFX
+needs no profile.
+
+```python
+"us_checking": {
+    "columns": {"date": "Posting Date", "amount": "Amount", "description": "Description"},
+    "date_format": "%m/%d/%Y",
+    "sign": 1,            # -1 if the export shows charges as positive
+    "skip_rows": 0,
+    "external_id_column": None,  # column with a bank-side unique id, if any
+},
+```
+
+Include a small fabricated CSV fixture (invented merchants, never real
+account data) in `tests/fixtures/` and a test asserting it ingests with the
+right sign convention — see `test_sign_convention_profile` in
+[`tests/test_ingest.py`](tests/test_ingest.py) for the pattern.
 
 ## Idempotency
 
@@ -144,8 +202,8 @@ from the same institution).
 ## Security invariants
 
 - `data/`, `*.db`, `*.csv`, `*.ofx`, `*.qfx`, `.env`, `analysis/`, and
-  `*.ipynb` gitignored from the first commit; test fixtures are fabricated
-  data only.
+  `*.ipynb` gitignored from the first commit; test fixtures and `demo`
+  data are fabricated only.
 - Account numbers are never parsed: the OFX reader and SimpleFIN connector
   drop `ACCTID`/`BANKID`-class fields at parse time. Only short labels
   ("US Checking") identify accounts. Asserted in `tests/test_security.py`.
@@ -175,7 +233,8 @@ uv run pytest
 The suite covers the acceptance checklist: mixed-mode dedupe in both
 orders, quarantine of malformed rows, integer-cents math, per-currency
 reporting, `run_sql` hardening against hostile inputs, recurring detection
-with gap tolerance, the MCP tools, and the security invariants above.
+with gap tolerance, the MCP tools, the demo seeder, and the security
+invariants above.
 
 ## License
 

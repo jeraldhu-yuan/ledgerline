@@ -5,12 +5,41 @@ description = "Local-first personal finance pipeline: ingest bank exports, categ
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"
+authors = [{ name = "Jerald Yuan" }]
+keywords = [
+    "personal-finance",
+    "mcp",
+    "model-context-protocol",
+    "sqlite",
+    "local-first",
+    "simplefin",
+    "budgeting",
+    "transactions",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial",
+    "Topic :: Office/Business :: Financial :: Accounting",
+]
 dependencies = [
     "click>=8.1",
     "rich>=13.0",
     "anthropic>=0.40",
     "mcp[cli]>=1.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/jeraldhu-yuan/ledgerline"
+Repository = "https://github.com/jeraldhu-yuan/ledgerline"
+Issues = "https://github.com/jeraldhu-yuan/ledgerline/issues"
 
 [project.scripts]
 ledgerline = "ledgerline.cli:cli"

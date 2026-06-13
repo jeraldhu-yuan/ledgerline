@@ -18,6 +18,9 @@ analysis/
 !tests/fixtures/*.ofx
 !tests/fixtures/*.qfx
 
+# Local tool state (per-machine permission grants, never publishable)
+.claude/
+
 # Python
 __pycache__/
 *.pyc

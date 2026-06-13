@@ -280,6 +280,39 @@ def export(db_file, month, out_file):
 
 
 @cli.command()
+@click.option("--force", is_flag=True,
+              help="Seed even if the database already contains transactions.")
+@click.pass_obj
+def demo(db_file, force):
+    """Seed ~6 months of fabricated data — try everything with zero real data."""
+    from ledgerline.demo import seed_demo
+
+    conn = db.connect(db_file)
+    result = seed_demo(conn, force=force)
+    db_path = (Path(db_file) if db_file else db.db_path()).resolve()
+    console.print(
+        f"Seeded [green]{result['transactions']}[/green] fabricated transactions"
+        f" across {result['accounts']} accounts"
+        f" ({result['first_date']} to {result['last_date']}),"
+        f" with {result['recurring_groups']} recurring groups.\n"
+    )
+    console.print("[bold]Try these next:[/bold]\n")
+    console.print(
+        "  ledgerline summary        # this month by category, vs prior month\n"
+        "  ledgerline upcoming       # expected charges in the next 30 days\n"
+    )
+    console.print("[bold]Connect an AI agent (read-only MCP):[/bold]\n")
+    console.print(
+        f"  codex mcp add ledgerline --env LEDGERLINE_DB={db_path} -- \\\n"
+        "    uvx --from ledgerline ledgerline-mcp\n"
+        f"  claude mcp add --scope user --transport stdio "
+        f"--env LEDGERLINE_DB={db_path} ledgerline -- \\\n"
+        "    uvx --from ledgerline ledgerline-mcp",
+        highlight=False,
+    )
+
+
+@cli.command()
 def connect():
     """One-time bank-sync setup: claim a SimpleFIN setup token."""
     from ledgerline.connectors.simplefin import claim_setup_token, store_access_url
