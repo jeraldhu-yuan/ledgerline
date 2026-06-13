@@ -54,6 +54,57 @@ def test_ask_without_key_fails_loudly(db_file, monkeypatch):
     assert "ANTHROPIC_API_KEY" in result.output
 
 
+def test_connect_with_token_flag_skips_prompt(db_file, monkeypatch, tmp_path):
+    import ledgerline.connectors.simplefin as simplefin
+
+    claimed = []
+    monkeypatch.setattr(
+        simplefin, "claim_setup_token",
+        lambda token: claimed.append(token) or "https://u:p@bridge.example.com/sf",
+    )
+    monkeypatch.setattr(
+        simplefin, "store_access_url", lambda url: tmp_path / "simplefin.env"
+    )
+    result = _run(db_file, "connect", "--token", "abc123")
+    assert result.exit_code == 0
+    assert claimed == ["abc123"]
+    assert "Connected" in result.output
+    assert "Paste the setup token" not in result.output
+
+
+def test_sync_accept_default_labels_non_interactive(db_file, monkeypatch):
+    import ledgerline.connectors.simplefin as simplefin
+
+    payload = {
+        "accounts": [
+            {
+                "id": "SF-ACT-9",
+                "name": "Everyday Checking (X9Z2)",
+                "currency": "USD",
+                "transactions": [
+                    {"id": "sf-901", "posted": 1767484800, "amount": "-12.34",
+                     "description": "PINEGATE HARDWARE"},
+                ],
+            }
+        ]
+    }
+    monkeypatch.setenv("SIMPLEFIN_ACCESS_URL", "https://u:p@bridge.example.com/sf")
+    monkeypatch.setattr(
+        simplefin, "fetch_accounts", lambda url, since=None, until=None: payload
+    )
+    result = _run(db_file, "sync", "--accept-default-labels")
+    assert result.exit_code == 0
+    assert "1 new" in result.output
+
+    from ledgerline import db
+
+    conn = db.connect(db_file)
+    names = [r["name"] for r in conn.execute("SELECT name FROM accounts")]
+    conn.close()
+    # provider name was sanitized (masked-digits suffix dropped), no prompt
+    assert names == ["Everyday Checking"]
+
+
 def test_accounts_set_context(db_file):
     assert _run(db_file, "accounts", "add", "Business Card").exit_code == 0
 

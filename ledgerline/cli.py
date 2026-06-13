@@ -305,23 +305,27 @@ def demo(db_file, force):
     console.print(
         f"  codex mcp add ledgerline --env LEDGERLINE_DB={db_path} -- \\\n"
         "    uvx --from ledgerline ledgerline-mcp\n"
-        f"  claude mcp add --scope user --transport stdio "
-        f"--env LEDGERLINE_DB={db_path} ledgerline -- \\\n"
-        "    uvx --from ledgerline ledgerline-mcp",
+        f"  claude mcp add ledgerline --transport stdio "
+        f"--env LEDGERLINE_DB={db_path} -- \\\n"
+        "    uvx --from ledgerline ledgerline-mcp\n\n"
+        "  (If the name is taken, pick another, e.g. ledgerline-demo.)",
         highlight=False,
     )
 
 
 @cli.command()
-def connect():
+@click.option("--token", default=None,
+              help="One-time SimpleFIN setup token (skips the interactive prompt).")
+def connect(token):
     """One-time bank-sync setup: claim a SimpleFIN setup token."""
     from ledgerline.connectors.simplefin import claim_setup_token, store_access_url
 
-    console.print(
-        "1. Sign up at [bold]https://bridge.simplefin.org[/bold] and link your bank(s).\n"
-        "2. On your account page, create a new app to get a one-time setup token.\n"
-    )
-    token = click.prompt("Paste the setup token")
+    if token is None:
+        console.print(
+            "1. Sign up at [bold]https://bridge.simplefin.org[/bold] and link your bank(s).\n"
+            "2. On your account page, create a new app to get a one-time setup token.\n"
+        )
+        token = click.prompt("Paste the setup token")
     access_url = claim_setup_token(token)
     stored = store_access_url(access_url)
     console.print(f"[green]Connected.[/green] Credentials stored in {stored} (owner-only).")
@@ -330,8 +334,11 @@ def connect():
 
 @cli.command()
 @click.option("--since", default=None, help="YYYY-MM-DD (default: latest local date with overlap).")
+@click.option("--accept-default-labels", is_flag=True,
+              help="Label new bank accounts automatically instead of prompting"
+                   " (for non-interactive use).")
 @click.pass_obj
-def sync(db_file, since):
+def sync(db_file, since, accept_default_labels):
     """Pull transactions via SimpleFIN Bridge through the same ingest pipeline."""
     from ledgerline.categorize import categorize_rules_only
     from ledgerline.connectors.simplefin import sync as sync_fn
@@ -339,6 +346,12 @@ def sync(db_file, since):
     conn = db.connect(db_file)
 
     def resolver(sfid: str, name: str) -> str:
+        if accept_default_labels:
+            from ledgerline.mcp_server import _safe_new_account_label
+
+            label = _safe_new_account_label(conn, name)
+            console.print(f'mapped SimpleFIN account "{name}" -> [green]{label}[/green]')
+            return label
         return click.prompt(
             f'SimpleFIN account "{name}" is not mapped yet. Local account label',
             default=name,

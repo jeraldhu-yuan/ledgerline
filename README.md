@@ -96,8 +96,8 @@ codex mcp add ledgerline --env LEDGERLINE_DB=/absolute/path/to/ledgerline.db -- 
   uvx --from ledgerline ledgerline-mcp
 
 # Claude Code (user scope)
-claude mcp add --scope user --transport stdio \
-  --env LEDGERLINE_DB=/absolute/path/to/ledgerline.db ledgerline -- \
+claude mcp add ledgerline --scope user --transport stdio \
+  --env LEDGERLINE_DB=/absolute/path/to/ledgerline.db -- \
   uvx --from ledgerline ledgerline-mcp
 ```
 
@@ -105,6 +105,31 @@ claude mcp add --scope user --transport stdio \
 `/path/to/ledgerline/.venv/bin/ledgerline-mcp` instead of `uvx`.) Restart
 the client, then ask things like "How much did I spend on dining in
 January?" or "What recurring charges are coming up?"
+
+## Setting up via an AI agent
+
+If an AI agent is doing the setup, every step is non-interactive except the
+ones that belong to the human:
+
+- **Human only:** signing up at SimpleFIN Bridge, linking banks, and
+  creating the setup token all happen on SimpleFIN's website with real
+  banking credentials. Never give an agent your bank login; the tool never
+  sees it either.
+- The human hands the agent only the one-time setup token. Then:
+
+```sh
+ledgerline connect --token "$SETUP_TOKEN"   # claim it, no prompt
+ledgerline sync --accept-default-labels     # map new accounts automatically
+```
+
+- The setup token is single-use: it is consumed by `connect` and worthless
+  afterward, so it transiting an agent's context is bounded risk. The
+  resulting access URL is stored owner-only on disk and never enters the
+  model.
+- The demo path (`ledgerline demo`) and file import (`ledgerline ingest`)
+  have no prompts at all, and `demo` prints the exact `codex mcp add` /
+  `claude mcp add` commands to wire up the MCP server. When registering,
+  pick a server name that doesn't collide with one the user already has.
 
 ## Usage
 
